@@ -35,6 +35,7 @@ const PROXY_POLL_INTERVAL: Duration = Duration::from_millis(/*millis*/ 20);
 struct ResponsesApiProxy {
     child: Child,
     port: u16,
+    auth_token: String,
 }
 
 impl ResponsesApiProxy {
@@ -59,13 +60,20 @@ impl ResponsesApiProxy {
         let deadline = Instant::now() + PROXY_START_TIMEOUT;
         loop {
             if let Ok(info) = std::fs::read_to_string(&server_info) {
-                let port = serde_json::from_str::<Value>(&info)?
+                let parsed: Value = serde_json::from_str(&info)?;
+                let port = parsed
                     .get("port")
                     .and_then(Value::as_u64)
                     .ok_or_else(|| anyhow!("proxy server info missing port"))?;
+                let auth_token = parsed
+                    .get("auth_token")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("proxy server info missing auth_token"))?
+                    .to_string();
                 return Ok(Self {
                     child,
                     port: u16::try_from(port)?,
+                    auth_token,
                 });
             }
             if let Some(status) = child.try_wait()? {
@@ -82,6 +90,10 @@ impl ResponsesApiProxy {
 
     fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}/v1", self.port)
+    }
+
+    fn auth_header(&self) -> (String, String) {
+        ("X-Proxy-Token".to_string(), self.auth_token.clone())
     }
 }
 
@@ -100,6 +112,16 @@ async fn responses_api_proxy_dumps_parent_and_subagent_identity_headers() -> Res
     let dump_dir = TempDir::new()?;
     let proxy =
         ResponsesApiProxy::start(&format!("{}/v1/responses", server.uri()), dump_dir.path())?;
+
+    // Sanity check: an unauthenticated POST is rejected outright.
+    let unauth_status = reqwest::Client::new()
+        .post(format!("{}/responses", proxy.base_url()))
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await?
+        .status();
+    assert_eq!(unauth_status.as_u16(), 401);
 
     let spawn_args = serde_json::to_string(&json!({ "message": CHILD_PROMPT }))?;
     mount_sse_once_match(
@@ -136,8 +158,12 @@ async fn responses_api_proxy_dumps_parent_and_subagent_identity_headers() -> Res
     .await;
 
     let proxy_base_url = proxy.base_url();
+    let (auth_header_name, auth_header_value) = proxy.auth_header();
     let mut builder = test_codex().with_config(move |config| {
         config.model_provider.base_url = Some(proxy_base_url);
+        let mut headers = config.model_provider.http_headers.take().unwrap_or_default();
+        headers.insert(auth_header_name.clone(), auth_header_value.clone());
+        config.model_provider.http_headers = Some(headers);
         config
             .features
             .disable(Feature::EnableRequestCompression)

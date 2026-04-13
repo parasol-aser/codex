@@ -17,10 +17,13 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 codex-process-hardening = { workspace = true }
+constant_time_eq = { workspace = true }
 ctor = { workspace = true }
 libc = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -28,4 +31,9 @@ tiny_http = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+assert_cmd = { workspace = true }
 pretty_assertions = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tiny_http = { workspace = true }
