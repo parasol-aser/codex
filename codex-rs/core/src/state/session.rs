@@ -77,6 +77,14 @@ impl SessionState {
         self.history.clone()
     }
 
+    pub(crate) fn drop_function_call_output_by_id(&mut self, call_id: &str) -> bool {
+        self.history.drop_function_call_output_by_id(call_id)
+    }
+
+    pub(crate) fn drop_reasoning_by_item_id(&mut self, item_id: &str) -> bool {
+        self.history.drop_reasoning_by_item_id(item_id)
+    }
+
     pub(crate) fn replace_history(
         &mut self,
         items: Vec<ResponseItem>,
