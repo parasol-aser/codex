@@ -39,17 +39,20 @@ pub(super) fn clone_git_source(
     Ok(())
 }
 
-fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
-    let mut command = Command::new("git");
-    command.args(args);
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
+pub(super) fn git_worktree_revision(root: &Path) -> Result<String> {
+    let output = run_git_output(&["rev-parse", "HEAD"], Some(root))?;
+    let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if revision.is_empty() {
+        bail!(
+            "git rev-parse HEAD returned an empty revision for {}",
+            root.display()
+        );
     }
+    Ok(revision)
+}
 
-    let output = command
-        .output()
-        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
+    let output = run_git_output(args, cwd)?;
     if output.status.success() {
         return Ok(());
     }
@@ -63,6 +66,19 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
         stdout.trim(),
         stderr.trim()
     );
+}
+
+fn run_git_output(args: &[&str], cwd: Option<&Path>) -> Result<std::process::Output> {
+    let mut command = Command::new("git");
+    command.args(args);
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+
+    command
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))
 }
 
 pub(super) fn replace_marketplace_root(staged_root: &Path, destination: &Path) -> Result<()> {
@@ -114,5 +130,45 @@ mod tests {
             fs::read_to_string(destination.join("marker.txt")).unwrap(),
             "installed"
         );
+    }
+
+    #[test]
+    fn git_worktree_revision_reads_head_revision() {
+        let repo = TempDir::new().unwrap();
+        Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "codex-test@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Codex Test"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        fs::write(repo.path().join("marker.txt"), "test").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        let expected = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let expected = String::from_utf8_lossy(&expected.stdout).trim().to_string();
+
+        assert_eq!(git_worktree_revision(repo.path()).unwrap(), expected);
     }
 }

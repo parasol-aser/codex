@@ -123,7 +123,18 @@ async fn run_add(args: AddMarketplaceArgs) -> Result<()> {
                 existing_root.display()
             )
         })?;
-        record_added_marketplace(&codex_home, &marketplace_name, &install_metadata)?;
+        let installed_revision = ops::git_worktree_revision(&existing_root).with_context(|| {
+            format!(
+                "failed to read installed marketplace revision from {}",
+                existing_root.display()
+            )
+        })?;
+        record_added_marketplace(
+            &codex_home,
+            &marketplace_name,
+            &install_metadata,
+            Some(installed_revision.as_str()),
+        )?;
         println!(
             "Marketplace `{marketplace_name}` is already added from {}.",
             source.display()
@@ -152,6 +163,12 @@ async fn run_add(args: AddMarketplaceArgs) -> Result<()> {
 
     let MarketplaceSource::Git { url, ref_name } = &source;
     ops::clone_git_source(url, ref_name.as_deref(), &sparse_paths, &staged_root)?;
+    let staged_revision = ops::git_worktree_revision(&staged_root).with_context(|| {
+        format!(
+            "failed to read staged marketplace revision from {}",
+            staged_root.display()
+        )
+    })?;
 
     let marketplace_name = validate_marketplace_source_root(&staged_root)
         .with_context(|| format!("failed to validate marketplace from {}", source.display()))?;
@@ -171,7 +188,12 @@ async fn run_add(args: AddMarketplaceArgs) -> Result<()> {
     }
     ops::replace_marketplace_root(&staged_root, &destination)
         .with_context(|| format!("failed to install marketplace at {}", destination.display()))?;
-    if let Err(err) = record_added_marketplace(&codex_home, &marketplace_name, &install_metadata) {
+    if let Err(err) = record_added_marketplace(
+        &codex_home,
+        &marketplace_name,
+        &install_metadata,
+        Some(staged_revision.as_str()),
+    ) {
         if let Err(rollback_err) = fs::rename(&destination, &staged_root) {
             bail!(
                 "{err}; additionally failed to roll back installed marketplace at {}: {rollback_err}",
@@ -211,12 +233,13 @@ fn record_added_marketplace(
     codex_home: &Path,
     marketplace_name: &str,
     install_metadata: &metadata::MarketplaceInstallMetadata,
+    last_revision: Option<&str>,
 ) -> Result<()> {
     let source = install_metadata.config_source();
     let last_updated = utc_timestamp_now()?;
     let update = MarketplaceConfigUpdate {
         last_updated: &last_updated,
-        last_revision: None,
+        last_revision,
         source_type: install_metadata.config_source_type(),
         source: &source,
         ref_name: install_metadata.ref_name(),
@@ -462,6 +485,7 @@ impl MarketplaceSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_core::config::CONFIG_TOML_FILE;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -636,5 +660,85 @@ mod tests {
 
         let upgrade_one = UpgradeMarketplaceArgs::try_parse_from(["upgrade", "debug"]).unwrap();
         assert_eq!(upgrade_one.marketplace_name.as_deref(), Some("debug"));
+    }
+
+    #[test]
+    fn record_added_marketplace_persists_last_revision() {
+        let codex_home = tempfile::tempdir().unwrap();
+        let source = MarketplaceSource::Git {
+            url: "https://github.com/owner/repo.git".to_string(),
+            ref_name: Some("main".to_string()),
+        };
+        let install_metadata = metadata::MarketplaceInstallMetadata::from_source(
+            &source,
+            &["plugins/foo".to_string()],
+        );
+
+        record_added_marketplace(
+            codex_home.path(),
+            "debug",
+            &install_metadata,
+            Some("0123456789abcdef0123456789abcdef01234567"),
+        )
+        .unwrap();
+
+        let config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE)).unwrap(),
+        )
+        .unwrap();
+        let marketplace = config
+            .get("marketplaces")
+            .and_then(toml::Value::as_table)
+            .and_then(|marketplaces| marketplaces.get("debug"))
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(
+            marketplace
+                .get("last_revision")
+                .and_then(toml::Value::as_str),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn record_added_marketplace_overwrites_existing_last_revision() {
+        let codex_home = tempfile::tempdir().unwrap();
+        let source = MarketplaceSource::Git {
+            url: "https://github.com/owner/repo.git".to_string(),
+            ref_name: None,
+        };
+        let install_metadata = metadata::MarketplaceInstallMetadata::from_source(&source, &[]);
+
+        record_added_marketplace(
+            codex_home.path(),
+            "debug",
+            &install_metadata,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        record_added_marketplace(
+            codex_home.path(),
+            "debug",
+            &install_metadata,
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .unwrap();
+
+        let config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE)).unwrap(),
+        )
+        .unwrap();
+        let marketplace = config
+            .get("marketplaces")
+            .and_then(toml::Value::as_table)
+            .and_then(|marketplaces| marketplaces.get("debug"))
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(
+            marketplace
+                .get("last_revision")
+                .and_then(toml::Value::as_str),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
     }
 }
