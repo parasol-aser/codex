@@ -514,6 +514,10 @@ fn record_sandbox_state_sync_result(
     }
 }
 
+fn sandbox_state_sync_error_message(error: String) -> String {
+    format!("MCP server has not acknowledged the latest sandbox state: {error}")
+}
+
 impl AsyncManagedClient {
     // Keep this constructor flat so the startup inputs remain readable at the
     // single call site instead of introducing a one-off params wrapper.
@@ -609,6 +613,28 @@ impl AsyncManagedClient {
         self.client.clone().await
     }
 
+    async fn startup_client(&self) -> Result<ManagedClient, StartupOutcomeError> {
+        if let Some(error) = self.sandbox_state_sync_error() {
+            return Err(StartupOutcomeError::Failed {
+                error: sandbox_state_sync_error_message(error),
+            });
+        }
+        let client = self.client().await?;
+        if let Some(error) = self.sandbox_state_sync_error() {
+            return Err(StartupOutcomeError::Failed {
+                error: sandbox_state_sync_error_message(error),
+            });
+        }
+        Ok(client)
+    }
+
+    async fn synced_client(&self) -> Result<ManagedClient> {
+        self.ensure_sandbox_state_synced()?;
+        let client = self.client().await.context("failed to get client")?;
+        self.ensure_sandbox_state_synced()?;
+        Ok(client)
+    }
+
     fn startup_snapshot_while_initializing(&self) -> Option<Vec<ToolInfo>> {
         if !self.startup_complete.load(Ordering::Acquire) {
             return self.startup_snapshot.clone();
@@ -625,9 +651,7 @@ impl AsyncManagedClient {
 
     fn ensure_sandbox_state_synced(&self) -> Result<()> {
         if let Some(error) = self.sandbox_state_sync_error() {
-            return Err(anyhow!(
-                "MCP server has not acknowledged the latest sandbox state: {error}"
-            ));
+            return Err(anyhow!(sandbox_state_sync_error_message(error)));
         }
         Ok(())
     }
@@ -886,7 +910,7 @@ impl McpConnectionManager {
             let submit_id = startup_submit_id.clone();
             let auth_entry = auth_entries.get(&server_name).cloned();
             join_set.spawn(async move {
-                let outcome = async_managed_client.client().await;
+                let outcome = async_managed_client.startup_client().await;
                 if cancel_token.is_cancelled() {
                     return (server_name, Err(StartupOutcomeError::Cancelled));
                 }
@@ -951,13 +975,7 @@ impl McpConnectionManager {
             .clients
             .get(name)
             .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?;
-        async_managed_client.ensure_sandbox_state_synced()?;
-        let client = async_managed_client
-            .client()
-            .await
-            .context("failed to get client")?;
-        async_managed_client.ensure_sandbox_state_synced()?;
-        Ok(client)
+        async_managed_client.synced_client().await
     }
 
     pub async fn resolve_elicitation(
@@ -976,7 +994,7 @@ impl McpConnectionManager {
             return false;
         };
 
-        match tokio::time::timeout(timeout, async_managed_client.client()).await {
+        match tokio::time::timeout(timeout, async_managed_client.startup_client()).await {
             Ok(Ok(_)) => true,
             Ok(Err(_)) | Err(_) => false,
         }
@@ -996,7 +1014,7 @@ impl McpConnectionManager {
                 continue;
             };
 
-            match async_managed_client.client().await {
+            match async_managed_client.startup_client().await {
                 Ok(_) => {}
                 Err(error) => failures.push(McpStartupFailure {
                     server: server_name.clone(),
@@ -1031,9 +1049,8 @@ impl McpConnectionManager {
             .clients
             .get(CODEX_APPS_MCP_SERVER_NAME)
             .ok_or_else(|| anyhow!("unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"))?
-            .client()
-            .await
-            .context("failed to get client")?;
+            .synced_client()
+            .await?;
 
         let list_start = Instant::now();
         let fetch_start = Instant::now();
@@ -1081,7 +1098,7 @@ impl McpConnectionManager {
 
         for (server_name, async_managed_client) in clients_snapshot {
             let server_name = server_name.clone();
-            let Ok(managed_client) = async_managed_client.client().await else {
+            let Ok(managed_client) = async_managed_client.synced_client().await else {
                 continue;
             };
             let timeout = managed_client.tool_timeout;
@@ -1147,7 +1164,7 @@ impl McpConnectionManager {
 
         for (server_name, async_managed_client) in clients_snapshot {
             let server_name_cloned = server_name.clone();
-            let Ok(managed_client) = async_managed_client.client().await else {
+            let Ok(managed_client) = async_managed_client.synced_client().await else {
                 continue;
             };
             let client = managed_client.client.clone();

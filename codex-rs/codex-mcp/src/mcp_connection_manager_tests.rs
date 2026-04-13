@@ -171,6 +171,40 @@ async fn client_by_name_fails_when_sandbox_state_sync_failed() {
         err.to_string()
             .contains("has not acknowledged the latest sandbox state")
     );
+
+    let ready = tokio::time::timeout(
+        Duration::from_millis(10),
+        manager.wait_for_server_ready("stale", Duration::from_secs(1)),
+    )
+    .await
+    .expect("stale sandbox state should fail readiness before awaiting client startup");
+    assert!(!ready);
+
+    let failures = tokio::time::timeout(
+        Duration::from_millis(10),
+        manager.required_startup_failures(&["stale".to_string()]),
+    )
+    .await
+    .expect("stale sandbox state should surface in required startup failures");
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0]
+            .error
+            .contains("has not acknowledged the latest sandbox state")
+    );
+
+    let resources = tokio::time::timeout(Duration::from_millis(10), manager.list_all_resources())
+        .await
+        .expect("stale sandbox state should skip aggregate resource listing");
+    assert!(resources.is_empty());
+
+    let templates = tokio::time::timeout(
+        Duration::from_millis(10),
+        manager.list_all_resource_templates(),
+    )
+    .await
+    .expect("stale sandbox state should skip aggregate resource template listing");
+    assert!(templates.is_empty());
 }
 
 #[test]
