@@ -2657,6 +2657,48 @@ async fn mcp_sandbox_state_changed_tracks_policy_and_cwd() {
 }
 
 #[tokio::test]
+async fn build_per_turn_config_uses_current_session_sandbox_policy() {
+    let mut session_configuration = make_session_configuration_for_tests().await;
+    let workspace = tempfile::tempdir().expect("create temp dir");
+    let cwd = workspace.path().join("project").abs();
+    let writable_root = cwd.join("writable");
+    std::fs::create_dir_all(&writable_root).expect("create writable root");
+
+    let sandbox_policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![writable_root],
+        read_only_access: ReadOnlyAccess::FullAccess,
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+    session_configuration.cwd = cwd;
+    session_configuration.sandbox_policy =
+        codex_config::Constrained::allow_any(sandbox_policy.clone());
+    session_configuration.file_system_sandbox_policy =
+        FileSystemSandboxPolicy::from_legacy_sandbox_policy(
+            &sandbox_policy,
+            &session_configuration.cwd,
+        );
+    session_configuration.network_sandbox_policy =
+        codex_protocol::permissions::NetworkSandboxPolicy::from(&sandbox_policy);
+
+    let per_turn_config = Session::build_per_turn_config(&session_configuration);
+
+    assert_eq!(
+        per_turn_config.permissions.sandbox_policy.get(),
+        session_configuration.sandbox_policy.get()
+    );
+    assert_eq!(
+        &per_turn_config.permissions.file_system_sandbox_policy,
+        &session_configuration.file_system_sandbox_policy
+    );
+    assert_eq!(
+        per_turn_config.permissions.network_sandbox_policy,
+        session_configuration.network_sandbox_policy
+    );
+}
+
+#[tokio::test]
 async fn session_update_settings_keeps_runtime_cwds_absolute() {
     let (session, turn_context) = make_session_and_context().await;
     let updated_cwd = turn_context.cwd.join("project");
