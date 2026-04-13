@@ -500,7 +500,6 @@ impl AsyncManagedClient {
         elicitation_requests: ElicitationRequestManager,
         codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
         tool_plugin_provenance: Arc<ToolPluginProvenance>,
-        latest_sandbox_state: Arc<StdMutex<SandboxState>>,
     ) -> Self {
         let tool_filter = ToolFilter::from_config(&config);
         let startup_snapshot = load_startup_cached_codex_apps_tools_snapshot(
@@ -512,7 +511,6 @@ impl AsyncManagedClient {
         let startup_complete = Arc::new(AtomicBool::new(false));
         let startup_complete_for_fut = Arc::clone(&startup_complete);
         let fut = async move {
-            let server_name_for_sandbox_state = server_name.clone();
             let outcome = async {
                 if let Err(error) = validate_mcp_server_name(&server_name) {
                     return Err(error.into());
@@ -544,17 +542,6 @@ impl AsyncManagedClient {
             .await;
 
             startup_complete_for_fut.store(true, Ordering::Release);
-            if let Ok(managed_client) = &outcome {
-                let sandbox_state = current_sandbox_state(&latest_sandbox_state);
-                if let Err(e) = managed_client
-                    .notify_sandbox_state_change(&sandbox_state)
-                    .await
-                {
-                    warn!(
-                        "Failed to notify sandbox state to MCP server {server_name_for_sandbox_state}: {e:#}",
-                    );
-                }
-            }
             outcome
         };
         let client = fut.boxed().shared();
@@ -678,29 +665,6 @@ pub struct McpConnectionManager {
     clients: HashMap<String, AsyncManagedClient>,
     server_origins: HashMap<String, String>,
     elicitation_requests: ElicitationRequestManager,
-    latest_sandbox_state: Arc<StdMutex<SandboxState>>,
-}
-
-fn current_sandbox_state(latest_sandbox_state: &StdMutex<SandboxState>) -> SandboxState {
-    match latest_sandbox_state.lock() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
-}
-
-fn replace_sandbox_state(
-    latest_sandbox_state: &StdMutex<SandboxState>,
-    sandbox_state: SandboxState,
-) {
-    match latest_sandbox_state.lock() {
-        Ok(mut guard) => {
-            *guard = sandbox_state;
-        }
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = sandbox_state;
-        }
-    }
 }
 
 impl McpConnectionManager {
@@ -724,12 +688,6 @@ impl McpConnectionManager {
         approval_policy: &Constrained<AskForApproval>,
         sandbox_policy: &Constrained<SandboxPolicy>,
     ) -> Self {
-        let sandbox_state = SandboxState {
-            sandbox_policy: sandbox_policy.get().clone(),
-            codex_linux_sandbox_exe: None,
-            sandbox_cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
-            use_legacy_landlock: false,
-        };
         Self {
             clients: HashMap::new(),
             server_origins: HashMap::new(),
@@ -737,7 +695,6 @@ impl McpConnectionManager {
                 approval_policy.value(),
                 sandbox_policy.get().clone(),
             ),
-            latest_sandbox_state: Arc::new(StdMutex::new(sandbox_state)),
         }
     }
 
@@ -782,7 +739,6 @@ impl McpConnectionManager {
             approval_policy.value(),
             initial_sandbox_state.sandbox_policy.clone(),
         );
-        let latest_sandbox_state = Arc::new(StdMutex::new(initial_sandbox_state));
         let tool_plugin_provenance = Arc::new(tool_plugin_provenance);
         let startup_submit_id = submit_id.clone();
         let mcp_servers = mcp_servers.clone();
@@ -817,19 +773,29 @@ impl McpConnectionManager {
                 elicitation_requests.clone(),
                 codex_apps_tools_cache_context,
                 Arc::clone(&tool_plugin_provenance),
-                Arc::clone(&latest_sandbox_state),
             );
             clients.insert(server_name.clone(), async_managed_client.clone());
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             let auth_entry = auth_entries.get(&server_name).cloned();
+            let sandbox_state = initial_sandbox_state.clone();
             join_set.spawn(async move {
                 let outcome = async_managed_client.client().await;
                 if cancel_token.is_cancelled() {
                     return (server_name, Err(StartupOutcomeError::Cancelled));
                 }
                 let status = match &outcome {
-                    Ok(_) => McpStartupStatus::Ready,
+                    Ok(_) => {
+                        if let Err(e) = async_managed_client
+                            .notify_sandbox_state_change(&sandbox_state)
+                            .await
+                        {
+                            warn!(
+                                "Failed to notify sandbox state to MCP server {server_name}: {e:#}",
+                            );
+                        }
+                        McpStartupStatus::Ready
+                    }
                     Err(error) => {
                         let error_str = mcp_init_error_display(
                             server_name.as_str(),
@@ -857,7 +823,6 @@ impl McpConnectionManager {
             clients,
             server_origins,
             elicitation_requests: elicitation_requests.clone(),
-            latest_sandbox_state,
         };
         tokio::spawn(async move {
             let outcomes = join_set.join_all().await;
@@ -1236,7 +1201,6 @@ impl McpConnectionManager {
     }
 
     pub async fn notify_sandbox_state_change(&self, sandbox_state: &SandboxState) -> Result<()> {
-        replace_sandbox_state(&self.latest_sandbox_state, sandbox_state.clone());
         let mut join_set = JoinSet::new();
 
         for async_managed_client in self.clients.values() {
