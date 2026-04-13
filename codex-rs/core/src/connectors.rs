@@ -232,6 +232,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_options_and_status(
         codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
         sandbox_cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         use_legacy_landlock: config.features.use_legacy_landlock(),
+        uses_managed_network_proxy: false,
     };
 
     let (mcp_connection_manager, cancel_token) = McpConnectionManager::new(

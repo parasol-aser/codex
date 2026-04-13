@@ -655,6 +655,8 @@ pub struct SandboxState {
     pub sandbox_cwd: PathBuf,
     #[serde(default)]
     pub use_legacy_landlock: bool,
+    #[serde(default)]
+    pub uses_managed_network_proxy: bool,
 }
 
 /// A thin wrapper around a set of running [`RmcpClient`] instances.
@@ -662,6 +664,29 @@ pub struct McpConnectionManager {
     clients: HashMap<String, AsyncManagedClient>,
     server_origins: HashMap<String, String>,
     elicitation_requests: ElicitationRequestManager,
+    latest_sandbox_state: Arc<StdMutex<SandboxState>>,
+}
+
+fn current_sandbox_state(latest_sandbox_state: &StdMutex<SandboxState>) -> SandboxState {
+    match latest_sandbox_state.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn replace_sandbox_state(
+    latest_sandbox_state: &StdMutex<SandboxState>,
+    sandbox_state: SandboxState,
+) {
+    match latest_sandbox_state.lock() {
+        Ok(mut guard) => {
+            *guard = sandbox_state;
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = sandbox_state;
+        }
+    }
 }
 
 impl McpConnectionManager {
@@ -685,6 +710,13 @@ impl McpConnectionManager {
         approval_policy: &Constrained<AskForApproval>,
         sandbox_policy: &Constrained<SandboxPolicy>,
     ) -> Self {
+        let sandbox_state = SandboxState {
+            sandbox_policy: sandbox_policy.get().clone(),
+            codex_linux_sandbox_exe: None,
+            sandbox_cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            use_legacy_landlock: false,
+            uses_managed_network_proxy: false,
+        };
         Self {
             clients: HashMap::new(),
             server_origins: HashMap::new(),
@@ -692,6 +724,7 @@ impl McpConnectionManager {
                 approval_policy.value(),
                 sandbox_policy.get().clone(),
             ),
+            latest_sandbox_state: Arc::new(StdMutex::new(sandbox_state)),
         }
     }
 
@@ -736,6 +769,7 @@ impl McpConnectionManager {
             approval_policy.value(),
             initial_sandbox_state.sandbox_policy.clone(),
         );
+        let latest_sandbox_state = Arc::new(StdMutex::new(initial_sandbox_state));
         let tool_plugin_provenance = Arc::new(tool_plugin_provenance);
         let startup_submit_id = submit_id.clone();
         let mcp_servers = mcp_servers.clone();
@@ -775,7 +809,7 @@ impl McpConnectionManager {
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             let auth_entry = auth_entries.get(&server_name).cloned();
-            let sandbox_state = initial_sandbox_state.clone();
+            let latest_sandbox_state = Arc::clone(&latest_sandbox_state);
             join_set.spawn(async move {
                 let outcome = async_managed_client.client().await;
                 if cancel_token.is_cancelled() {
@@ -784,6 +818,7 @@ impl McpConnectionManager {
                 let status = match &outcome {
                     Ok(_) => {
                         // Send sandbox state notification immediately after Ready
+                        let sandbox_state = current_sandbox_state(&latest_sandbox_state);
                         if let Err(e) = async_managed_client
                             .notify_sandbox_state_change(&sandbox_state)
                             .await
@@ -821,6 +856,7 @@ impl McpConnectionManager {
             clients,
             server_origins,
             elicitation_requests: elicitation_requests.clone(),
+            latest_sandbox_state,
         };
         tokio::spawn(async move {
             let outcomes = join_set.join_all().await;
@@ -1199,6 +1235,7 @@ impl McpConnectionManager {
     }
 
     pub async fn notify_sandbox_state_change(&self, sandbox_state: &SandboxState) -> Result<()> {
+        replace_sandbox_state(&self.latest_sandbox_state, sandbox_state.clone());
         let mut join_set = JoinSet::new();
 
         for async_managed_client in self.clients.values() {

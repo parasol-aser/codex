@@ -61,6 +61,39 @@ fn create_codex_apps_tools_cache_context(
     }
 }
 
+#[tokio::test]
+async fn notify_sandbox_state_change_updates_latest_state_cache() {
+    let manager = McpConnectionManager::new_uninitialized(
+        &Constrained::allow_any(AskForApproval::Never),
+        &Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+    );
+    let temp_dir = tempdir().expect("tempdir");
+    let sandbox_cwd = temp_dir.path().join("workspace");
+    let sandbox_state = SandboxState {
+        sandbox_policy: SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            read_only_access: Default::default(),
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        },
+        codex_linux_sandbox_exe: None,
+        sandbox_cwd: sandbox_cwd.clone(),
+        use_legacy_landlock: false,
+        uses_managed_network_proxy: true,
+    };
+
+    manager
+        .notify_sandbox_state_change(&sandbox_state)
+        .await
+        .expect("sandbox state update should succeed without clients");
+
+    let cached = current_sandbox_state(&manager.latest_sandbox_state);
+    assert_eq!(cached.sandbox_policy, sandbox_state.sandbox_policy);
+    assert_eq!(cached.sandbox_cwd, sandbox_state.sandbox_cwd);
+    assert!(cached.uses_managed_network_proxy);
+}
+
 #[test]
 fn declared_openai_file_fields_treat_names_literally() {
     let meta = serde_json::json!({
