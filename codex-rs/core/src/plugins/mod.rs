@@ -59,6 +59,8 @@ pub use marketplace::MarketplacePluginInstallPolicy;
 pub use marketplace::MarketplacePluginPolicy;
 pub use marketplace::MarketplacePluginSource;
 pub use marketplace::validate_marketplace_root;
+pub use marketplace_upgrade::ConfiguredMarketplaceUpgradeError as PluginMarketplaceUpgradeError;
+pub use marketplace_upgrade::ConfiguredMarketplaceUpgradeOutcome as PluginMarketplaceUpgradeOutcome;
 pub use remote::RemotePluginFetchError;
 pub use remote::fetch_remote_featured_plugin_ids;
 pub(crate) use render::render_explicit_plugin_instructions;

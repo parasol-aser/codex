@@ -4,8 +4,11 @@ use anyhow::bail;
 use clap::Parser;
 use codex_config::MarketplaceConfigUpdate;
 use codex_config::record_user_marketplace;
+use codex_core::config::Config;
 use codex_core::config::find_codex_home;
 use codex_core::plugins::OPENAI_CURATED_MARKETPLACE_NAME;
+use codex_core::plugins::PluginMarketplaceUpgradeOutcome;
+use codex_core::plugins::PluginsManager;
 use codex_core::plugins::marketplace_install_root;
 use codex_core::plugins::validate_marketplace_root;
 use codex_core::plugins::validate_plugin_segment;
@@ -31,6 +34,9 @@ pub struct MarketplaceCli {
 enum MarketplaceSubcommand {
     /// Add a remote marketplace repository.
     Add(AddMarketplaceArgs),
+
+    /// Upgrade configured Git marketplaces.
+    Upgrade(UpgradeMarketplaceArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -51,6 +57,12 @@ struct AddMarketplaceArgs {
     sparse_paths: Vec<String>,
 }
 
+#[derive(Debug, Parser)]
+struct UpgradeMarketplaceArgs {
+    /// Upgrade only one configured marketplace. When omitted, upgrades all configured Git marketplaces.
+    marketplace_name: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum MarketplaceSource {
     Git {
@@ -68,12 +80,13 @@ impl MarketplaceCli {
 
         // Validate overrides now. This command writes to CODEX_HOME only; marketplace discovery
         // happens from that cache root after the next plugin/list or app-server start.
-        config_overrides
+        let overrides = config_overrides
             .parse_overrides()
             .map_err(anyhow::Error::msg)?;
 
         match subcommand {
             MarketplaceSubcommand::Add(args) => run_add(args).await?,
+            MarketplaceSubcommand::Upgrade(args) => run_upgrade(overrides, args).await?,
         }
 
         Ok(())
@@ -177,6 +190,23 @@ async fn run_add(args: AddMarketplaceArgs) -> Result<()> {
     Ok(())
 }
 
+async fn run_upgrade(
+    overrides: Vec<(String, toml::Value)>,
+    args: UpgradeMarketplaceArgs,
+) -> Result<()> {
+    let UpgradeMarketplaceArgs { marketplace_name } = args;
+    let config = Config::load_with_cli_overrides(overrides)
+        .await
+        .context("failed to load configuration")?;
+    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+    let manager = PluginsManager::new(codex_home);
+    let outcome = manager
+        .upgrade_configured_marketplaces_for_config(&config, marketplace_name.as_deref())
+        .map_err(anyhow::Error::msg)?;
+    print_upgrade_outcome(&outcome, marketplace_name.as_deref())?;
+    Ok(())
+}
+
 fn record_added_marketplace(
     codex_home: &Path,
     marketplace_name: &str,
@@ -195,6 +225,44 @@ fn record_added_marketplace(
     record_user_marketplace(codex_home, marketplace_name, &update).with_context(|| {
         format!("failed to add marketplace `{marketplace_name}` to user config.toml")
     })?;
+    Ok(())
+}
+
+fn print_upgrade_outcome(
+    outcome: &PluginMarketplaceUpgradeOutcome,
+    marketplace_name: Option<&str>,
+) -> Result<()> {
+    for error in &outcome.errors {
+        eprintln!(
+            "Failed to upgrade marketplace `{}`: {}",
+            error.marketplace_name, error.message
+        );
+    }
+    if !outcome.all_succeeded() {
+        bail!("{} upgrade failure(s) occurred.", outcome.errors.len());
+    }
+
+    let selection_label = marketplace_name.unwrap_or("all configured Git marketplaces");
+    if outcome.selected_marketplaces.is_empty() {
+        println!("No configured Git marketplaces to upgrade.");
+    } else if outcome.upgraded_roots.is_empty() {
+        if marketplace_name.is_some() {
+            println!("Marketplace `{selection_label}` is already up to date.");
+        } else {
+            println!("All configured Git marketplaces are already up to date.");
+        }
+    } else if marketplace_name.is_some() {
+        println!("Upgraded marketplace `{selection_label}` to the latest configured revision.");
+        for root in &outcome.upgraded_roots {
+            println!("Installed marketplace root: {}", root.display());
+        }
+    } else {
+        println!("Upgraded {} marketplace(s).", outcome.upgraded_roots.len());
+        for root in &outcome.upgraded_roots {
+            println!("Installed marketplace root: {}", root.display());
+        }
+    }
+
     Ok(())
 }
 
@@ -559,5 +627,14 @@ mod tests {
             repeated_sparse.sparse_paths,
             vec!["plugins/foo", "skills/bar"]
         );
+    }
+
+    #[test]
+    fn upgrade_subcommand_parses_optional_marketplace_name() {
+        let upgrade_all = UpgradeMarketplaceArgs::try_parse_from(["upgrade"]).unwrap();
+        assert_eq!(upgrade_all.marketplace_name, None);
+
+        let upgrade_one = UpgradeMarketplaceArgs::try_parse_from(["upgrade", "debug"]).unwrap();
+        assert_eq!(upgrade_one.marketplace_name.as_deref(), Some("debug"));
     }
 }
