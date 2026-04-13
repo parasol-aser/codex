@@ -595,6 +595,10 @@ fn default_permissions_profile_populates_runtime_sandbox_policy() -> std::io::Re
         codex_home.path().to_path_buf(),
     )?;
 
+    assert_eq!(
+        config.permissions.active_profile_name.as_deref(),
+        Some("workspace")
+    );
     let memories_root = codex_home.path().join("memories").abs();
     assert_eq!(
         config.permissions.file_system_sandbox_policy,
@@ -4494,6 +4498,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             permissions: Permissions {
+                active_profile_name: None,
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
                 file_system_sandbox_policy: FileSystemSandboxPolicy::from(
@@ -4640,6 +4645,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         model_provider_id: "openai-custom".to_string(),
         model_provider: fixture.openai_custom_provider.clone(),
         permissions: Permissions {
+            active_profile_name: None,
             approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             file_system_sandbox_policy: FileSystemSandboxPolicy::from(
@@ -4784,6 +4790,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
         permissions: Permissions {
+            active_profile_name: None,
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             file_system_sandbox_policy: FileSystemSandboxPolicy::from(
@@ -4914,6 +4921,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
         permissions: Permissions {
+            active_profile_name: None,
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
             file_system_sandbox_policy: FileSystemSandboxPolicy::from(
