@@ -2624,6 +2624,39 @@ async fn session_configuration_apply_rederives_legacy_file_system_policy_on_cwd_
 }
 
 #[tokio::test]
+async fn mcp_sandbox_state_changed_tracks_policy_and_cwd() {
+    let session_configuration = make_session_configuration_for_tests().await;
+
+    assert!(!mcp_sandbox_state_changed(
+        &session_configuration,
+        &session_configuration
+    ));
+
+    let workspace = tempfile::tempdir().expect("create temp dir");
+    let mut cwd_updated = session_configuration.clone();
+    cwd_updated.cwd = workspace.path().join("project").abs();
+    assert!(mcp_sandbox_state_changed(
+        &session_configuration,
+        &cwd_updated
+    ));
+
+    let mut policy_updated = session_configuration.clone();
+    policy_updated.sandbox_policy =
+        codex_config::Constrained::allow_any(SandboxPolicy::DangerFullAccess);
+    assert!(mcp_sandbox_state_changed(
+        &session_configuration,
+        &policy_updated
+    ));
+
+    let mut unrelated_update = session_configuration.clone();
+    unrelated_update.app_server_client_name = Some("codex-app".to_string());
+    assert!(!mcp_sandbox_state_changed(
+        &session_configuration,
+        &unrelated_update
+    ));
+}
+
+#[tokio::test]
 async fn session_update_settings_keeps_runtime_cwds_absolute() {
     let (session, turn_context) = make_session_and_context().await;
     let updated_cwd = turn_context.cwd.join("project");

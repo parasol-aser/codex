@@ -1290,6 +1290,10 @@ pub(crate) struct AppServerClientMetadata {
     pub(crate) client_version: Option<String>,
 }
 
+fn mcp_sandbox_state_changed(previous: &SessionConfiguration, next: &SessionConfiguration) -> bool {
+    previous.sandbox_policy != next.sandbox_policy || previous.cwd != next.cwd
+}
+
 impl Session {
     pub(crate) async fn app_server_client_metadata(&self) -> AppServerClientMetadata {
         let state = self.state.lock().await;
@@ -1406,6 +1410,25 @@ impl Session {
         };
         if let Err(err) = spec.apply_to_started_proxy(started_proxy).await {
             warn!("failed to refresh managed network proxy for sandbox change: {err}");
+        }
+    }
+
+    async fn notify_mcp_sandbox_state_change(&self, per_turn_config: &Config) {
+        let sandbox_state = SandboxState {
+            sandbox_policy: per_turn_config.permissions.sandbox_policy.get().clone(),
+            codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
+            sandbox_cwd: per_turn_config.cwd.to_path_buf(),
+            use_legacy_landlock: per_turn_config.features.use_legacy_landlock(),
+        };
+        if let Err(e) = self
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .notify_sandbox_state_change(&sandbox_state)
+            .await
+        {
+            warn!("Failed to notify sandbox state change to MCP servers: {e:#}");
         }
     }
 
@@ -2494,9 +2517,12 @@ impl Session {
                 let previous_cwd = state.session_configuration.cwd.clone();
                 let sandbox_policy_changed =
                     state.session_configuration.sandbox_policy != updated.sandbox_policy;
+                let sandbox_state_changed =
+                    mcp_sandbox_state_changed(&state.session_configuration, &updated);
                 let next_cwd = updated.cwd.clone();
                 let codex_home = updated.codex_home.clone();
                 let session_source = updated.session_source.clone();
+                let session_configuration = updated.clone();
                 state.session_configuration = updated;
                 drop(state);
 
@@ -2509,6 +2535,10 @@ impl Session {
                 if sandbox_policy_changed {
                     self.refresh_managed_network_proxy_for_current_sandbox_policy()
                         .await;
+                }
+                if sandbox_state_changed {
+                    let per_turn_config = Self::build_per_turn_config(&session_configuration);
+                    self.notify_mcp_sandbox_state_change(&per_turn_config).await;
                 }
 
                 Ok(())
@@ -2528,6 +2558,7 @@ impl Session {
         let (
             session_configuration,
             sandbox_policy_changed,
+            sandbox_state_changed,
             previous_cwd,
             codex_home,
             session_source,
@@ -2538,12 +2569,15 @@ impl Session {
                     let previous_cwd = state.session_configuration.cwd.clone();
                     let sandbox_policy_changed =
                         state.session_configuration.sandbox_policy != next.sandbox_policy;
+                    let sandbox_state_changed =
+                        mcp_sandbox_state_changed(&state.session_configuration, &next);
                     let codex_home = next.codex_home.clone();
                     let session_source = next.session_source.clone();
                     state.session_configuration = next.clone();
                     (
                         next,
                         sandbox_policy_changed,
+                        sandbox_state_changed,
                         previous_cwd,
                         codex_home,
                         session_source,
@@ -2577,6 +2611,7 @@ impl Session {
                 session_configuration,
                 updates.final_output_json_schema,
                 sandbox_policy_changed,
+                sandbox_state_changed,
             )
             .await)
     }
@@ -2587,6 +2622,7 @@ impl Session {
         session_configuration: SessionConfiguration,
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
+        sandbox_state_changed: bool,
     ) -> Arc<TurnContext> {
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
         {
@@ -2599,22 +2635,9 @@ impl Session {
         if sandbox_policy_changed {
             self.refresh_managed_network_proxy_for_current_sandbox_policy()
                 .await;
-            let sandbox_state = SandboxState {
-                sandbox_policy: per_turn_config.permissions.sandbox_policy.get().clone(),
-                codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
-                sandbox_cwd: per_turn_config.cwd.to_path_buf(),
-                use_legacy_landlock: per_turn_config.features.use_legacy_landlock(),
-            };
-            if let Err(e) = self
-                .services
-                .mcp_connection_manager
-                .read()
-                .await
-                .notify_sandbox_state_change(&sandbox_state)
-                .await
-            {
-                warn!("Failed to notify sandbox state change to MCP servers: {e:#}");
-            }
+        }
+        if sandbox_state_changed {
+            self.notify_mcp_sandbox_state_change(&per_turn_config).await;
         }
 
         let model_info = self
@@ -2767,6 +2790,7 @@ impl Session {
             session_configuration,
             /*final_output_json_schema*/ None,
             /*sandbox_policy_changed*/ false,
+            /*sandbox_state_changed*/ false,
         )
         .await
     }
