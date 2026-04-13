@@ -194,6 +194,35 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItem>) {
     });
 }
 
+/// Drop any `FunctionCallOutput` / `CustomToolCallOutput` whose `call_id` matches
+/// the provided id. Returns `true` if any item was removed. Used by the targeted
+/// replay-repair path that reacts to the server's
+/// "No tool call found for function call output with call_id …" error.
+pub(crate) fn drop_function_call_output_by_id(
+    items: &mut Vec<ResponseItem>,
+    call_id: &str,
+) -> bool {
+    let before = items.len();
+    items.retain(|item| match item {
+        ResponseItem::FunctionCallOutput { call_id: cid, .. } => cid != call_id,
+        ResponseItem::CustomToolCallOutput { call_id: cid, .. } => cid != call_id,
+        _ => true,
+    });
+    items.len() != before
+}
+
+/// Drop any `Reasoning` item whose `id` matches the provided id. Returns `true`
+/// if any item was removed. Used by the targeted replay-repair path for
+/// "Item … of type reasoning was provided without its required following item."
+pub(crate) fn drop_reasoning_by_item_id(items: &mut Vec<ResponseItem>, item_id: &str) -> bool {
+    let before = items.len();
+    items.retain(|item| match item {
+        ResponseItem::Reasoning { id, .. } => id != item_id,
+        _ => true,
+    });
+    items.len() != before
+}
+
 pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItem>, item: &ResponseItem) {
     match item {
         ResponseItem::FunctionCall { call_id, .. } => {

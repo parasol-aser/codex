@@ -3918,6 +3918,21 @@ impl Session {
         state.clone_history()
     }
 
+    /// Apply a targeted in-memory repair after the server rejected a request
+    /// because the input violated a call/output or reasoning-sequence
+    /// invariant. Returns `true` when the history changed.
+    pub(crate) async fn apply_replay_repair(&self, repair: &ReplayRepair) -> bool {
+        let mut state = self.state.lock().await;
+        match repair {
+            ReplayRepair::DropOrphanFunctionCallOutput(call_id) => {
+                state.drop_function_call_output_by_id(call_id)
+            }
+            ReplayRepair::DropOrphanReasoning(item_id) => {
+                state.drop_reasoning_by_item_id(item_id)
+            }
+        }
+    }
+
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
         let state = self.state.lock().await;
         state.reference_context_item()
@@ -6773,6 +6788,50 @@ fn connector_inserted_in_messages(
     connector_count == 1 && skill_count == 0 && mention_names_lower.contains(&mention_slug)
 }
 
+/// A narrow set of in-memory history repairs that respond to specific
+/// Responses API "invalid_request_error" messages whose only fix is to drop an
+/// orphan item from our replay input and retry. These are invariant-class
+/// errors (call/output pairing, reasoning-sequence) that the server considers
+/// non-retryable, but which we can locally self-heal.
+#[derive(Debug, Clone)]
+pub(crate) enum ReplayRepair {
+    DropOrphanFunctionCallOutput(String),
+    DropOrphanReasoning(String),
+}
+
+fn classify_replay_repair(message: &str) -> Option<ReplayRepair> {
+    // "No tool call found for function call output with call_id {id}."
+    const ORPHAN_OUTPUT_PREFIX: &str =
+        "No tool call found for function call output with call_id ";
+    if let Some(rest) = message.find(ORPHAN_OUTPUT_PREFIX).map(|idx| {
+        let start = idx + ORPHAN_OUTPUT_PREFIX.len();
+        &message[start..]
+    }) {
+        let id: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '.' && *c != ',' && *c != '"')
+            .collect();
+        if !id.is_empty() {
+            return Some(ReplayRepair::DropOrphanFunctionCallOutput(id));
+        }
+    }
+
+    // "Item {id} of type reasoning was provided without its required following item."
+    const REASONING_PREFIX: &str = "Item ";
+    const REASONING_SUFFIX: &str = " of type reasoning was provided without";
+    if let Some(prefix_idx) = message.find(REASONING_PREFIX)
+        && let Some(suffix_idx) = message.find(REASONING_SUFFIX)
+        && suffix_idx > prefix_idx + REASONING_PREFIX.len()
+    {
+        let id = message[prefix_idx + REASONING_PREFIX.len()..suffix_idx].trim();
+        if !id.is_empty() {
+            return Some(ReplayRepair::DropOrphanReasoning(id.to_string()));
+        }
+    }
+
+    None
+}
+
 pub(crate) fn build_prompt(
     input: Vec<ResponseItem>,
     router: &ToolRouter,
@@ -6856,6 +6915,10 @@ async fn run_sampling_request(
         .await;
     let mut retries = 0;
     let mut initial_input = Some(input);
+    // Bound the one-shot replay-repair path so we never loop forever if the
+    // server keeps rejecting the same call_id after repair.
+    let mut replay_repair_attempts: u8 = 0;
+    const MAX_REPLAY_REPAIRS: u8 = 3;
     loop {
         let prompt_input = if let Some(input) = initial_input.take() {
             input
@@ -6899,6 +6962,42 @@ async fn run_sampling_request(
             }
             Err(err) => err,
         };
+
+        // Targeted self-heal for Responses API invariant rejections
+        // (orphan function-call output, orphan reasoning). These are
+        // classified as non-retryable today; the repair path short-circuits
+        // *before* the `is_retryable` check below so the retry can happen.
+        if let CodexErr::InvalidRequest(message) = &err
+            && let Some(repair) = classify_replay_repair(message)
+            && replay_repair_attempts < MAX_REPLAY_REPAIRS
+        {
+            let changed = sess.apply_replay_repair(&repair).await;
+            replay_repair_attempts = replay_repair_attempts.saturating_add(1);
+            match &repair {
+                ReplayRepair::DropOrphanFunctionCallOutput(call_id) => {
+                    warn!(
+                        call_id = %call_id,
+                        changed,
+                        "dropping orphan function_call_output after server rejection",
+                    );
+                }
+                ReplayRepair::DropOrphanReasoning(item_id) => {
+                    warn!(
+                        item_id = %item_id,
+                        changed,
+                        "dropping orphan reasoning item after server rejection",
+                    );
+                }
+            }
+            // Reset the websocket baseline regardless of whether local
+            // history changed: the server's complaint may be against a
+            // previous_response_id snapshot that diverged from our current
+            // history, in which case dropping the baseline is what restores
+            // consistency. The retry loop's `for_prompt` normalization will
+            // then send an invariant-clean snapshot.
+            client_session.reset_websocket_session();
+            continue;
+        }
 
         if !err.is_retryable() {
             return Err(err);

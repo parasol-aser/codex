@@ -187,6 +187,26 @@ impl ContextManager {
         self.history_version = self.history_version.saturating_add(1);
     }
 
+    /// Remove any tool-call output whose `call_id` matches. Bumps `history_version`
+    /// when an item is removed so cached websocket baselines invalidate.
+    pub(crate) fn drop_function_call_output_by_id(&mut self, call_id: &str) -> bool {
+        let dropped = normalize::drop_function_call_output_by_id(&mut self.items, call_id);
+        if dropped {
+            self.history_version = self.history_version.saturating_add(1);
+        }
+        dropped
+    }
+
+    /// Remove the reasoning item with the given id. Bumps `history_version` on
+    /// removal so cached websocket baselines invalidate.
+    pub(crate) fn drop_reasoning_by_item_id(&mut self, item_id: &str) -> bool {
+        let dropped = normalize::drop_reasoning_by_item_id(&mut self.items, item_id);
+        if dropped {
+            self.history_version = self.history_version.saturating_add(1);
+        }
+        dropped
+    }
+
     /// Replace image content in the last turn if it originated from a tool output.
     /// Returns true when a tool image was replaced, false otherwise.
     pub(crate) fn replace_last_turn_images(&mut self, placeholder: &str) -> bool {

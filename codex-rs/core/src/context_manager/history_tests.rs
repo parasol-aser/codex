@@ -1669,6 +1669,110 @@ fn normalize_mixed_inserts_and_removals_panics_in_debug() {
 }
 
 #[test]
+fn drop_function_call_output_by_id_removes_matching_output() {
+    let items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "f1".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "keep".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "keep".to_string(),
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "drop-me".to_string(),
+            output: FunctionCallOutputPayload::from_text("orphan".to_string()),
+        },
+    ];
+    let mut h = create_history_with_items(items);
+    let before = h.history_version();
+
+    let dropped = h.drop_function_call_output_by_id("drop-me");
+
+    assert!(dropped);
+    assert_eq!(h.history_version(), before + 1);
+    let remaining: Vec<&str> = h
+        .raw_items()
+        .iter()
+        .filter_map(|i| match i {
+            ResponseItem::FunctionCallOutput { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(remaining, vec!["keep"]);
+}
+
+#[test]
+fn drop_function_call_output_by_id_handles_custom_tool_variant() {
+    let items = vec![
+        custom_tool_call_output("drop-custom", "orphan"),
+        custom_tool_call_output("keep-custom", "ok"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_function_call_output_by_id("drop-custom");
+
+    assert!(dropped);
+    let remaining: Vec<&str> = h
+        .raw_items()
+        .iter()
+        .filter_map(|i| match i {
+            ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(remaining, vec!["keep-custom"]);
+}
+
+#[test]
+fn drop_function_call_output_by_id_is_noop_when_no_match() {
+    let items = vec![ResponseItem::FunctionCallOutput {
+        call_id: "only".to_string(),
+        output: FunctionCallOutputPayload::from_text("ok".to_string()),
+    }];
+    let mut h = create_history_with_items(items);
+    let before = h.history_version();
+
+    let dropped = h.drop_function_call_output_by_id("missing");
+
+    assert!(!dropped);
+    assert_eq!(h.history_version(), before);
+    assert_eq!(h.raw_items().len(), 1);
+}
+
+#[test]
+fn drop_reasoning_by_item_id_removes_matching_reasoning() {
+    let mut drop_me = reasoning_msg("drop");
+    if let ResponseItem::Reasoning { id, .. } = &mut drop_me {
+        *id = "r-drop".to_string();
+    }
+    let mut keep = reasoning_msg("keep");
+    if let ResponseItem::Reasoning { id, .. } = &mut keep {
+        *id = "r-keep".to_string();
+    }
+
+    let mut h = create_history_with_items(vec![drop_me, keep]);
+    let before = h.history_version();
+
+    let dropped = h.drop_reasoning_by_item_id("r-drop");
+
+    assert!(dropped);
+    assert_eq!(h.history_version(), before + 1);
+    let remaining_ids: Vec<&str> = h
+        .raw_items()
+        .iter()
+        .filter_map(|i| match i {
+            ResponseItem::Reasoning { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(remaining_ids, vec!["r-keep"]);
+}
+
+#[test]
 fn image_data_url_payload_does_not_dominate_message_estimate() {
     let payload = "A".repeat(100_000);
     let image_url = format!("data:image/png;base64,{payload}");
@@ -1954,4 +2058,355 @@ fn text_only_items_unchanged() {
     let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
 
     assert_eq!(estimated, raw_len);
+}
+
+// -----------------------------------------------------------------------------
+// drop_function_call_output_by_id — targeted orphan repair helper (#17630).
+// -----------------------------------------------------------------------------
+
+fn function_call_item(call_id: &str) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        id: None,
+        name: "do_it".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: call_id.to_string(),
+    }
+}
+
+fn function_call_output_item(call_id: &str, output: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        call_id: call_id.to_string(),
+        output: FunctionCallOutputPayload::from_text(output.to_string()),
+    }
+}
+
+#[test]
+fn drop_function_call_output_by_id_removes_output_but_preserves_call() {
+    let items = vec![
+        function_call_item("call-1"),
+        function_call_output_item("call-1", "ok"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_function_call_output_by_id("call-1");
+    assert!(dropped, "expected to report a drop when output was removed");
+
+    // Per PLAN: the repair drops the output and leaves the call so the model
+    // can re-issue it on the next turn.
+    assert_eq!(h.raw_items(), vec![function_call_item("call-1")]);
+}
+
+#[test]
+fn drop_function_call_output_by_id_leaves_other_outputs() {
+    let items = vec![
+        function_call_item("call-keep"),
+        function_call_output_item("call-keep", "kept"),
+        function_call_item("call-drop"),
+        function_call_output_item("call-drop", "to-be-dropped"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_function_call_output_by_id("call-drop");
+    assert!(dropped);
+
+    assert_eq!(
+        h.raw_items(),
+        vec![
+            function_call_item("call-keep"),
+            function_call_output_item("call-keep", "kept"),
+            function_call_item("call-drop"),
+        ]
+    );
+}
+
+#[test]
+fn drop_function_call_output_by_id_bumps_history_version_when_dropped() {
+    let items = vec![
+        function_call_item("call-1"),
+        function_call_output_item("call-1", "ok"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let version_before = h.history_version();
+    let dropped = h.drop_function_call_output_by_id("call-1");
+    assert!(dropped);
+
+    // PLAN step D: must bump history_version so cached websocket baselines
+    // (get_incremental_items) invalidate.
+    assert!(
+        h.history_version() > version_before,
+        "history_version must increment on drop: before={version_before}, after={}",
+        h.history_version()
+    );
+}
+
+#[test]
+fn drop_function_call_output_by_id_does_not_bump_history_version_when_noop() {
+    let items = vec![
+        function_call_item("call-1"),
+        function_call_output_item("call-1", "ok"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let version_before = h.history_version();
+    let dropped = h.drop_function_call_output_by_id("nonexistent");
+    assert!(!dropped, "expected noop when no output matches");
+    assert_eq!(
+        h.history_version(),
+        version_before,
+        "history_version must not change when no item is dropped"
+    );
+}
+
+#[test]
+fn drop_function_call_output_by_id_handles_custom_tool_variant_with_paired_call() {
+    // PLAN edge case #9: the Responses API uses a single schema for
+    // custom_tool_call_output as well — repair must drop both variants.
+    let items = vec![
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "tool-1".to_string(),
+            name: "custom".to_string(),
+            input: "{}".to_string(),
+        },
+        ResponseItem::CustomToolCallOutput {
+            call_id: "tool-1".to_string(),
+            name: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+        },
+    ];
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_function_call_output_by_id("tool-1");
+    assert!(dropped);
+
+    assert_eq!(
+        h.raw_items(),
+        vec![ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "tool-1".to_string(),
+            name: "custom".to_string(),
+            input: "{}".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn drop_function_call_output_by_id_noop_preserves_all_items() {
+    let items = vec![
+        function_call_item("call-x"),
+        function_call_output_item("call-x", "ok"),
+    ];
+    let expected = items.clone();
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_function_call_output_by_id("nonexistent-call-id");
+    assert!(!dropped, "expected noop when no output matches");
+    assert_eq!(h.raw_items(), expected);
+}
+
+#[test]
+fn drop_function_call_output_by_id_empty_history_is_noop() {
+    let mut h = ContextManager::new();
+    let version_before = h.history_version();
+    assert!(!h.drop_function_call_output_by_id("call-anything"));
+    assert_eq!(h.raw_items(), &[] as &[ResponseItem]);
+    assert_eq!(h.history_version(), version_before);
+}
+
+#[test]
+fn drop_function_call_output_by_id_empty_call_id_does_not_match_normal_outputs() {
+    // PLAN: ensure outputs with non-empty call_id are not accidentally dropped
+    // when an empty call_id is passed to the repair helper.
+    let items = vec![
+        function_call_item("call-1"),
+        function_call_output_item("call-1", "ok"),
+    ];
+    let expected = items.clone();
+    let mut h = create_history_with_items(items);
+    let dropped = h.drop_function_call_output_by_id("");
+    assert!(!dropped, "empty call_id must not match a non-empty output");
+    assert_eq!(h.raw_items(), expected);
+}
+
+#[test]
+fn drop_function_call_output_by_id_drops_all_matching_duplicates() {
+    // Defensive: if (somehow) there are multiple outputs with the same call_id,
+    // the repair should drop all of them so the retry's normalized snapshot is
+    // invariant-clean.
+    let items = vec![
+        function_call_item("call-dup"),
+        function_call_output_item("call-dup", "first"),
+        function_call_output_item("call-dup", "second"),
+        function_call_item("call-keep"),
+        function_call_output_item("call-keep", "kept"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_function_call_output_by_id("call-dup");
+    assert!(dropped);
+    assert!(
+        h.raw_items().iter().all(|item| !matches!(
+            item,
+            ResponseItem::FunctionCallOutput { call_id, .. } if call_id == "call-dup"
+        )),
+        "all outputs with call-dup should be removed"
+    );
+}
+
+#[test]
+fn drop_function_call_output_by_id_leaves_local_shell_call_intact() {
+    // PLAN edge case #6: LocalShellCall.call_id is Option<String>. The repair
+    // helper drops the output only, not the call — shell call stays put.
+    let items = vec![
+        ResponseItem::LocalShellCall {
+            id: None,
+            call_id: Some("shell-1".to_string()),
+            status: LocalShellStatus::Completed,
+            action: LocalShellAction::Exec(LocalShellExecAction {
+                command: vec!["echo".to_string(), "hi".to_string()],
+                timeout_ms: None,
+                working_directory: None,
+                env: None,
+                user: None,
+            }),
+        },
+        function_call_output_item("shell-1", "ok"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_function_call_output_by_id("shell-1");
+    assert!(dropped);
+    assert_eq!(
+        h.raw_items(),
+        vec![ResponseItem::LocalShellCall {
+            id: None,
+            call_id: Some("shell-1".to_string()),
+            status: LocalShellStatus::Completed,
+            action: LocalShellAction::Exec(LocalShellExecAction {
+                command: vec!["echo".to_string(), "hi".to_string()],
+                timeout_ms: None,
+                working_directory: None,
+                env: None,
+                user: None,
+            }),
+        }]
+    );
+}
+
+#[test]
+fn drop_function_call_output_by_id_does_not_remove_unrelated_calls() {
+    // PLAN: repair only touches outputs. Non-output items (calls, messages,
+    // reasoning, tool_search_*) must pass through untouched even if their ids
+    // coincidentally match.
+    let items = vec![
+        function_call_item("call-1"),
+        user_msg("hi"),
+        assistant_msg("hello"),
+        reasoning_msg("thinking"),
+        function_call_output_item("call-1", "ok"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    assert!(h.drop_function_call_output_by_id("call-1"));
+    assert_eq!(
+        h.raw_items(),
+        vec![
+            function_call_item("call-1"),
+            user_msg("hi"),
+            assistant_msg("hello"),
+            reasoning_msg("thinking"),
+        ]
+    );
+}
+
+// -----------------------------------------------------------------------------
+// drop_reasoning_by_item_id — mirror helper for orphan reasoning (#17161).
+// -----------------------------------------------------------------------------
+
+fn reasoning_with_id(id: &str) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: id.to_string(),
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "summary".to_string(),
+        }],
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: "thinking...".to_string(),
+        }]),
+        encrypted_content: None,
+    }
+}
+
+#[test]
+fn drop_reasoning_by_item_id_removes_matching_in_middle_of_history() {
+    let items = vec![
+        user_msg("hi"),
+        reasoning_with_id("rs_abc"),
+        assistant_msg("hello"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    let dropped = h.drop_reasoning_by_item_id("rs_abc");
+    assert!(dropped);
+    assert_eq!(
+        h.raw_items(),
+        vec![user_msg("hi"), assistant_msg("hello"),]
+    );
+}
+
+#[test]
+fn drop_reasoning_by_item_id_is_noop_when_no_match() {
+    let items = vec![reasoning_with_id("rs_keep")];
+    let expected = items.clone();
+    let mut h = create_history_with_items(items);
+
+    let version_before = h.history_version();
+    let dropped = h.drop_reasoning_by_item_id("rs_missing");
+    assert!(!dropped);
+    assert_eq!(h.raw_items(), expected);
+    assert_eq!(h.history_version(), version_before);
+}
+
+#[test]
+fn drop_reasoning_by_item_id_bumps_history_version() {
+    let items = vec![reasoning_with_id("rs_abc")];
+    let mut h = create_history_with_items(items);
+
+    let version_before = h.history_version();
+    assert!(h.drop_reasoning_by_item_id("rs_abc"));
+    assert!(h.history_version() > version_before);
+}
+
+#[test]
+fn drop_reasoning_by_item_id_does_not_touch_other_reasoning_items() {
+    let items = vec![
+        reasoning_with_id("rs_keep"),
+        reasoning_with_id("rs_drop"),
+        reasoning_with_id("rs_keep_2"),
+    ];
+    let mut h = create_history_with_items(items);
+
+    assert!(h.drop_reasoning_by_item_id("rs_drop"));
+    assert_eq!(
+        h.raw_items(),
+        vec![reasoning_with_id("rs_keep"), reasoning_with_id("rs_keep_2"),]
+    );
+}
+
+#[test]
+fn drop_reasoning_by_item_id_does_not_touch_function_calls_with_same_id() {
+    // Defensive: reasoning repair must only affect Reasoning items, not
+    // accidentally drop FunctionCall items whose call_id happens to collide.
+    let items = vec![
+        function_call_item("rs_abc"),
+        function_call_output_item("rs_abc", "ok"),
+    ];
+    let expected = items.clone();
+    let mut h = create_history_with_items(items);
+
+    assert!(!h.drop_reasoning_by_item_id("rs_abc"));
+    assert_eq!(h.raw_items(), expected);
 }
