@@ -108,6 +108,7 @@ async fn notify_sandbox_state_change_does_not_wait_for_pending_startup_client() 
             client: pending_client,
             startup_snapshot: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_state_sync_error: Arc::new(StdMutex::new(None)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
         },
     );
@@ -137,6 +138,39 @@ async fn notify_sandbox_state_change_does_not_wait_for_pending_startup_client() 
     let cached = current_sandbox_state(&manager.latest_sandbox_state);
     assert_eq!(cached.sandbox_policy, sandbox_state.sandbox_policy);
     assert_eq!(cached.sandbox_cwd, sandbox_state.sandbox_cwd);
+}
+
+#[tokio::test]
+async fn client_by_name_fails_when_sandbox_state_sync_failed() {
+    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+        .boxed()
+        .shared();
+    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let sandbox_policy = Constrained::allow_any(SandboxPolicy::new_read_only_policy());
+    let mut manager = McpConnectionManager::new_uninitialized(&approval_policy, &sandbox_policy);
+    manager.clients.insert(
+        "stale".to_string(),
+        AsyncManagedClient {
+            client: pending_client,
+            startup_snapshot: None,
+            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            sandbox_state_sync_error: Arc::new(StdMutex::new(Some("update timed out".to_string()))),
+            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+        },
+    );
+
+    let result = tokio::time::timeout(Duration::from_millis(10), manager.client_by_name("stale"))
+        .await
+        .expect("stale sandbox state should fail before awaiting client startup");
+    let err = match result {
+        Ok(_) => panic!("stale sandbox state should fail closed"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string()
+            .contains("has not acknowledged the latest sandbox state")
+    );
 }
 
 #[test]
@@ -712,6 +746,7 @@ async fn list_all_tools_uses_startup_snapshot_while_client_is_pending() {
             client: pending_client,
             startup_snapshot: Some(startup_tools),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_state_sync_error: Arc::new(StdMutex::new(None)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
         },
     );
@@ -738,6 +773,7 @@ async fn list_all_tools_blocks_while_client_is_pending_without_startup_snapshot(
             client: pending_client,
             startup_snapshot: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_state_sync_error: Arc::new(StdMutex::new(None)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
         },
     );
@@ -761,6 +797,7 @@ async fn list_all_tools_does_not_block_when_startup_snapshot_cache_hit_is_empty(
             client: pending_client,
             startup_snapshot: Some(Vec::new()),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_state_sync_error: Arc::new(StdMutex::new(None)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
         },
     );
@@ -794,6 +831,7 @@ async fn list_all_tools_uses_startup_snapshot_when_client_startup_fails() {
             client: failed_client,
             startup_snapshot: Some(startup_tools),
             startup_complete,
+            sandbox_state_sync_error: Arc::new(StdMutex::new(None)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
         },
     );

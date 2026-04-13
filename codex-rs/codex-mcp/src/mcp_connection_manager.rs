@@ -487,7 +487,31 @@ struct AsyncManagedClient {
     client: Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>,
     startup_snapshot: Option<Vec<ToolInfo>>,
     startup_complete: Arc<AtomicBool>,
+    sandbox_state_sync_error: Arc<StdMutex<Option<String>>>,
     tool_plugin_provenance: Arc<ToolPluginProvenance>,
+}
+
+fn record_sandbox_state_sync_result(
+    sandbox_state_sync_error: &StdMutex<Option<String>>,
+    result: Result<()>,
+) -> Result<()> {
+    match result {
+        Ok(()) => {
+            match sandbox_state_sync_error.lock() {
+                Ok(mut guard) => *guard = None,
+                Err(poisoned) => *poisoned.into_inner() = None,
+            }
+            Ok(())
+        }
+        Err(err) => {
+            let message = format!("{err:#}");
+            match sandbox_state_sync_error.lock() {
+                Ok(mut guard) => *guard = Some(message),
+                Err(poisoned) => *poisoned.into_inner() = Some(message),
+            }
+            Err(err)
+        }
+    }
 }
 
 impl AsyncManagedClient {
@@ -514,6 +538,8 @@ impl AsyncManagedClient {
         let startup_tool_filter = tool_filter;
         let startup_complete = Arc::new(AtomicBool::new(false));
         let startup_complete_for_fut = Arc::clone(&startup_complete);
+        let sandbox_state_sync_error = Arc::new(StdMutex::new(None));
+        let sandbox_state_sync_error_for_fut = Arc::clone(&sandbox_state_sync_error);
         let fut = async move {
             let server_name_for_sandbox_state = server_name.clone();
             let outcome = async {
@@ -549,10 +575,12 @@ impl AsyncManagedClient {
             startup_complete_for_fut.store(true, Ordering::Release);
             if let Ok(managed_client) = &outcome {
                 let sandbox_state = current_sandbox_state(&latest_sandbox_state);
-                if let Err(e) = managed_client
-                    .notify_sandbox_state_change(&sandbox_state)
-                    .await
-                {
+                if let Err(e) = record_sandbox_state_sync_result(
+                    &sandbox_state_sync_error_for_fut,
+                    managed_client
+                        .notify_sandbox_state_change(&sandbox_state)
+                        .await,
+                ) {
                     warn!(
                         "Failed to notify sandbox state to MCP server {server_name_for_sandbox_state}: {e:#}",
                     );
@@ -572,6 +600,7 @@ impl AsyncManagedClient {
             client,
             startup_snapshot,
             startup_complete,
+            sandbox_state_sync_error,
             tool_plugin_provenance,
         }
     }
@@ -585,6 +614,22 @@ impl AsyncManagedClient {
             return self.startup_snapshot.clone();
         }
         None
+    }
+
+    fn sandbox_state_sync_error(&self) -> Option<String> {
+        match self.sandbox_state_sync_error.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn ensure_sandbox_state_synced(&self) -> Result<()> {
+        if let Some(error) = self.sandbox_state_sync_error() {
+            return Err(anyhow!(
+                "MCP server has not acknowledged the latest sandbox state: {error}"
+            ));
+        }
+        Ok(())
     }
 
     async fn listed_tools(&self) -> Option<Vec<ToolInfo>> {
@@ -640,11 +685,19 @@ impl AsyncManagedClient {
         };
 
         // Keep cache payloads raw; plugin provenance is resolved per-session at read time.
+        if self.sandbox_state_sync_error().is_some() {
+            return None;
+        }
         let tools = if let Some(startup_tools) = self.startup_snapshot_while_initializing() {
             Some(startup_tools)
         } else {
             match self.client().await {
-                Ok(client) => Some(client.listed_tools()),
+                Ok(client) => {
+                    if self.sandbox_state_sync_error().is_some() {
+                        return None;
+                    }
+                    Some(client.listed_tools())
+                }
                 Err(_) => self.startup_snapshot.clone(),
             }
         };
@@ -656,7 +709,10 @@ impl AsyncManagedClient {
             return Ok(());
         }
         let managed = self.client().await?;
-        managed.notify_sandbox_state_change(sandbox_state).await
+        record_sandbox_state_sync_result(
+            &self.sandbox_state_sync_error,
+            managed.notify_sandbox_state_change(sandbox_state).await,
+        )
     }
 }
 
@@ -891,12 +947,17 @@ impl McpConnectionManager {
     }
 
     async fn client_by_name(&self, name: &str) -> Result<ManagedClient> {
-        self.clients
+        let async_managed_client = self
+            .clients
             .get(name)
-            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?
+            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?;
+        async_managed_client.ensure_sandbox_state_synced()?;
+        let client = async_managed_client
             .client()
             .await
-            .context("failed to get client")
+            .context("failed to get client")?;
+        async_managed_client.ensure_sandbox_state_synced()?;
+        Ok(client)
     }
 
     pub async fn resolve_elicitation(
@@ -1244,6 +1305,7 @@ impl McpConnectionManager {
     pub async fn notify_sandbox_state_change(&self, sandbox_state: &SandboxState) -> Result<()> {
         replace_sandbox_state(&self.latest_sandbox_state, sandbox_state.clone());
         let mut join_set = JoinSet::new();
+        let mut first_error = None;
 
         for async_managed_client in self.clients.values() {
             let sandbox_state = sandbox_state.clone();
@@ -1260,14 +1322,26 @@ impl McpConnectionManager {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
                     warn!("Failed to notify sandbox state change to MCP server: {err:#}");
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
                 }
                 Err(err) => {
                     warn!("Task panic when notifying sandbox state change to MCP server: {err:#}");
+                    if first_error.is_none() {
+                        first_error = Some(anyhow!(
+                            "task panic when notifying sandbox state change to MCP server: {err:#}"
+                        ));
+                    }
                 }
             }
         }
 
-        Ok(())
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
     }
 }
 
