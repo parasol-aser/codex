@@ -14,6 +14,7 @@ use tiny_http::Header;
 use tiny_http::Method;
 
 const AUTHORIZATION_HEADER_NAME: &str = "authorization";
+const X_PROXY_TOKEN_HEADER_NAME: &str = "x-proxy-token";
 const REDACTED_HEADER_VALUE: &str = "[REDACTED]";
 
 pub(crate) struct ExchangeDumper {
@@ -185,6 +186,7 @@ impl From<(&reqwest::header::HeaderName, &reqwest::header::HeaderValue)> for Hea
 
 fn should_redact_header(name: &str) -> bool {
     name.eq_ignore_ascii_case(AUTHORIZATION_HEADER_NAME)
+        || name.eq_ignore_ascii_case(X_PROXY_TOKEN_HEADER_NAME)
         || name.to_ascii_lowercase().contains("cookie")
 }
 
@@ -228,6 +230,8 @@ mod tests {
         let headers = vec![
             Header::from_bytes(&b"Authorization"[..], &b"Bearer secret"[..])
                 .expect("authorization header"),
+            Header::from_bytes(&b"X-Proxy-Token"[..], &b"proxy-secret"[..])
+                .expect("x-proxy-token header"),
             Header::from_bytes(&b"Cookie"[..], &b"user-session=secret"[..]).expect("cookie header"),
             Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                 .expect("content-type header"),
@@ -253,6 +257,10 @@ mod tests {
                 "headers": [
                     {
                         "name": "Authorization",
+                        "value": "[REDACTED]"
+                    },
+                    {
+                        "name": "X-Proxy-Token",
                         "value": "[REDACTED]"
                     },
                     {
