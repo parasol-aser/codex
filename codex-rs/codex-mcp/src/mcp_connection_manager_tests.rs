@@ -94,6 +94,51 @@ async fn notify_sandbox_state_change_updates_latest_state_cache() {
     assert!(cached.uses_managed_network_proxy);
 }
 
+#[tokio::test]
+async fn notify_sandbox_state_change_does_not_wait_for_pending_startup_client() {
+    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+        .boxed()
+        .shared();
+    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let sandbox_policy = Constrained::allow_any(SandboxPolicy::new_read_only_policy());
+    let mut manager = McpConnectionManager::new_uninitialized(&approval_policy, &sandbox_policy);
+    manager.clients.insert(
+        "pending".to_string(),
+        AsyncManagedClient {
+            client: pending_client,
+            startup_snapshot: None,
+            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+        },
+    );
+    let temp_dir = tempdir().expect("tempdir");
+    let sandbox_state = SandboxState {
+        sandbox_policy: SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            read_only_access: Default::default(),
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        },
+        codex_linux_sandbox_exe: None,
+        sandbox_cwd: temp_dir.path().join("workspace"),
+        use_legacy_landlock: false,
+        uses_managed_network_proxy: false,
+    };
+
+    tokio::time::timeout(
+        Duration::from_millis(10),
+        manager.notify_sandbox_state_change(&sandbox_state),
+    )
+    .await
+    .expect("pending startup clients should not block sandbox-state updates")
+    .expect("sandbox state update should succeed");
+
+    let cached = current_sandbox_state(&manager.latest_sandbox_state);
+    assert_eq!(cached.sandbox_policy, sandbox_state.sandbox_policy);
+    assert_eq!(cached.sandbox_cwd, sandbox_state.sandbox_cwd);
+}
+
 #[test]
 fn declared_openai_file_fields_treat_names_literally() {
     let meta = serde_json::json!({

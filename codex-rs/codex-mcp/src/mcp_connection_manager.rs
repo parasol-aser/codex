@@ -100,6 +100,7 @@ pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default timeout for individual tool calls.
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+const SANDBOX_STATE_UPDATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION: u8 = 2;
 const CODEX_APPS_TOOLS_CACHE_DIR: &str = "cache/codex_apps_tools";
@@ -468,13 +469,15 @@ impl ManagedClient {
             return Ok(());
         }
 
-        let _response = self
-            .client
-            .send_custom_request(
+        let _response = tokio::time::timeout(
+            SANDBOX_STATE_UPDATE_TIMEOUT,
+            self.client.send_custom_request(
                 MCP_SANDBOX_STATE_METHOD,
                 Some(serde_json::to_value(sandbox_state)?),
-            )
-            .await?;
+            ),
+        )
+        .await
+        .map_err(|_| anyhow!("sandbox state update timed out"))??;
         Ok(())
     }
 }
@@ -500,6 +503,7 @@ impl AsyncManagedClient {
         elicitation_requests: ElicitationRequestManager,
         codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
         tool_plugin_provenance: Arc<ToolPluginProvenance>,
+        latest_sandbox_state: Arc<StdMutex<SandboxState>>,
     ) -> Self {
         let tool_filter = ToolFilter::from_config(&config);
         let startup_snapshot = load_startup_cached_codex_apps_tools_snapshot(
@@ -511,6 +515,7 @@ impl AsyncManagedClient {
         let startup_complete = Arc::new(AtomicBool::new(false));
         let startup_complete_for_fut = Arc::clone(&startup_complete);
         let fut = async move {
+            let server_name_for_sandbox_state = server_name.clone();
             let outcome = async {
                 if let Err(error) = validate_mcp_server_name(&server_name) {
                     return Err(error.into());
@@ -542,6 +547,17 @@ impl AsyncManagedClient {
             .await;
 
             startup_complete_for_fut.store(true, Ordering::Release);
+            if let Ok(managed_client) = &outcome {
+                let sandbox_state = current_sandbox_state(&latest_sandbox_state);
+                if let Err(e) = managed_client
+                    .notify_sandbox_state_change(&sandbox_state)
+                    .await
+                {
+                    warn!(
+                        "Failed to notify sandbox state to MCP server {server_name_for_sandbox_state}: {e:#}",
+                    );
+                }
+            }
             outcome
         };
         let client = fut.boxed().shared();
@@ -636,6 +652,9 @@ impl AsyncManagedClient {
     }
 
     async fn notify_sandbox_state_change(&self, sandbox_state: &SandboxState) -> Result<()> {
+        if !self.startup_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let managed = self.client().await?;
         managed.notify_sandbox_state_change(sandbox_state).await
     }
@@ -804,31 +823,19 @@ impl McpConnectionManager {
                 elicitation_requests.clone(),
                 codex_apps_tools_cache_context,
                 Arc::clone(&tool_plugin_provenance),
+                Arc::clone(&latest_sandbox_state),
             );
             clients.insert(server_name.clone(), async_managed_client.clone());
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             let auth_entry = auth_entries.get(&server_name).cloned();
-            let latest_sandbox_state = Arc::clone(&latest_sandbox_state);
             join_set.spawn(async move {
                 let outcome = async_managed_client.client().await;
                 if cancel_token.is_cancelled() {
                     return (server_name, Err(StartupOutcomeError::Cancelled));
                 }
                 let status = match &outcome {
-                    Ok(_) => {
-                        // Send sandbox state notification immediately after Ready
-                        let sandbox_state = current_sandbox_state(&latest_sandbox_state);
-                        if let Err(e) = async_managed_client
-                            .notify_sandbox_state_change(&sandbox_state)
-                            .await
-                        {
-                            warn!(
-                                "Failed to notify sandbox state to MCP server {server_name}: {e:#}",
-                            );
-                        }
-                        McpStartupStatus::Ready
-                    }
+                    Ok(_) => McpStartupStatus::Ready,
                     Err(error) => {
                         let error_str = mcp_init_error_display(
                             server_name.as_str(),
