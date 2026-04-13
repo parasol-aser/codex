@@ -81,6 +81,25 @@ struct ProxyPolicyInputs {
     unix_domain_socket_policy: UnixDomainSocketPolicy,
 }
 
+impl ProxyPolicyInputs {
+    fn with_extra_unix_sockets(mut self, extra_allow_unix_sockets: &[PathBuf]) -> Self {
+        if let UnixDomainSocketPolicy::Restricted { allowed } = &mut self.unix_domain_socket_policy
+        {
+            allowed.extend(extra_allow_unix_sockets.iter().filter_map(|socket_path| {
+                let normalized = normalize_path_for_sandbox(socket_path);
+                if normalized.is_none() {
+                    warn!(
+                        "ignoring explicit allow-unix-socket entry because it could not be normalized: {}",
+                        socket_path.display()
+                    );
+                }
+                normalized
+            }));
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 // Keep allow-all and allowlist modes disjoint so we don't carry ignored state.
 enum UnixDomainSocketPolicy {
@@ -244,8 +263,17 @@ fn dynamic_network_policy_for_network(
     enforce_managed_network: bool,
     proxy: &ProxyPolicyInputs,
 ) -> String {
-    let should_use_restricted_network_policy =
-        !proxy.ports.is_empty() || proxy.has_proxy_config || enforce_managed_network;
+    let has_unix_socket_access = matches!(
+        proxy.unix_domain_socket_policy,
+        UnixDomainSocketPolicy::AllowAll
+    ) || matches!(
+        &proxy.unix_domain_socket_policy,
+        UnixDomainSocketPolicy::Restricted { allowed } if !allowed.is_empty()
+    );
+    let should_use_restricted_network_policy = !proxy.ports.is_empty()
+        || proxy.has_proxy_config
+        || enforce_managed_network
+        || has_unix_socket_access;
     if should_use_restricted_network_policy {
         let mut policy = String::new();
         if proxy.allow_local_binding {
@@ -382,6 +410,26 @@ pub fn create_seatbelt_command_args_for_policies(
     enforce_managed_network: bool,
     network: Option<&NetworkProxy>,
 ) -> Vec<String> {
+    create_seatbelt_command_args_for_policies_with_extra_unix_sockets(
+        command,
+        file_system_sandbox_policy,
+        network_sandbox_policy,
+        sandbox_policy_cwd,
+        enforce_managed_network,
+        network,
+        &[],
+    )
+}
+
+pub fn create_seatbelt_command_args_for_policies_with_extra_unix_sockets(
+    command: Vec<String>,
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    network_sandbox_policy: NetworkSandboxPolicy,
+    sandbox_policy_cwd: &Path,
+    enforce_managed_network: bool,
+    network: Option<&NetworkProxy>,
+    extra_allow_unix_sockets: &[PathBuf],
+) -> Vec<String> {
     let unreadable_roots =
         file_system_sandbox_policy.get_unreadable_roots_with_cwd(sandbox_policy_cwd);
     let (file_write_policy, file_write_dir_params) =
@@ -465,7 +513,7 @@ pub fn create_seatbelt_command_args_for_policies(
             }
         };
 
-    let proxy = proxy_policy_inputs(network);
+    let proxy = proxy_policy_inputs(network).with_extra_unix_sockets(extra_allow_unix_sockets);
     let network_policy =
         dynamic_network_policy_for_network(network_sandbox_policy, enforce_managed_network, &proxy);
 

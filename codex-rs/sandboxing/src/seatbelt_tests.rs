@@ -4,6 +4,7 @@ use super::ProxyPolicyInputs;
 use super::UnixDomainSocketPolicy;
 use super::create_seatbelt_command_args;
 use super::create_seatbelt_command_args_for_policies;
+use super::create_seatbelt_command_args_for_policies_with_extra_unix_sockets;
 use super::dynamic_network_policy;
 use super::macos_dir_params;
 use super::normalize_path_for_sandbox;
@@ -448,6 +449,45 @@ fn create_seatbelt_args_allowlists_unix_socket_paths() {
     assert!(
         !policy.contains("(allow network* (subpath"),
         "policy should no longer use the generic subpath unix-socket rules:\n{policy}"
+    );
+}
+
+#[test]
+fn create_seatbelt_args_allowlists_explicit_unix_socket_paths_without_proxy() {
+    let cwd = TempDir::new().expect("temp cwd");
+    let file_system_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy(
+        &SandboxPolicy::new_read_only_policy(),
+        cwd.path(),
+    );
+    let args = create_seatbelt_command_args_for_policies_with_extra_unix_sockets(
+        vec!["/usr/bin/true".to_string()],
+        &file_system_policy,
+        NetworkSandboxPolicy::Restricted,
+        cwd.path(),
+        /*enforce_managed_network*/ false,
+        /*network*/ None,
+        &[PathBuf::from("/tmp/codex-browser-use")],
+    );
+    let policy = seatbelt_policy_arg(&args);
+
+    assert!(
+        policy.contains("(allow system-socket (socket-domain AF_UNIX))"),
+        "policy should allow AF_UNIX when explicit socket paths are requested:\n{policy}"
+    );
+    assert!(
+        policy.contains(
+            "(allow network-outbound (remote unix-socket (subpath (param \"UNIX_SOCKET_PATH_0\"))))"
+        ),
+        "policy should allow outbound AF_UNIX traffic for explicit socket paths:\n{policy}"
+    );
+    let expected_socket_root = normalize_path_for_sandbox(Path::new("/tmp/codex-browser-use"))
+        .expect("socket root should normalize")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        args.iter()
+            .any(|arg| arg == &format!("-DUNIX_SOCKET_PATH_0={expected_socket_root}")),
+        "seatbelt args should pass the configured socket root as a sandbox param: {args:?}"
     );
 }
 

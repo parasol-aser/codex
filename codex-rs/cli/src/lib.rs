@@ -4,6 +4,7 @@ pub(crate) mod login;
 
 use clap::Parser;
 use codex_utils_cli::CliConfigOverrides;
+use std::path::PathBuf;
 
 pub use debug_sandbox::run_command_under_landlock;
 pub use debug_sandbox::run_command_under_seatbelt;
@@ -21,6 +22,10 @@ pub struct SeatbeltCommand {
     /// Convenience alias for low-friction sandboxed automatic execution (network-disabled sandbox that can write to cwd and TMPDIR)
     #[arg(long = "full-auto", default_value_t = false)]
     pub full_auto: bool,
+
+    /// Allow the sandboxed command to bind/connect AF_UNIX sockets rooted at this absolute path. Repeat to allow multiple paths.
+    #[arg(long = "allow-unix-socket")]
+    pub allow_unix_sockets: Vec<PathBuf>,
 
     /// While the command runs, capture macOS sandbox denials via `log stream` and print them after exit
     #[arg(long = "log-denials", default_value_t = false)]
