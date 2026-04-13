@@ -1419,7 +1419,6 @@ impl Session {
             codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
             sandbox_cwd: per_turn_config.cwd.to_path_buf(),
             use_legacy_landlock: per_turn_config.features.use_legacy_landlock(),
-            uses_managed_network_proxy: per_turn_config.permissions.network.is_some(),
         };
         if let Err(e) = self
             .services
@@ -2152,7 +2151,6 @@ impl Session {
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
             sandbox_cwd: session_configuration.cwd.to_path_buf(),
             use_legacy_landlock: config.features.use_legacy_landlock(),
-            uses_managed_network_proxy: config.permissions.network.is_some(),
         };
         let mut required_mcp_servers: Vec<String> = mcp_servers
             .iter()
@@ -4523,7 +4521,6 @@ impl Session {
             codex_linux_sandbox_exe: turn_context.codex_linux_sandbox_exe.clone(),
             sandbox_cwd: turn_context.cwd.to_path_buf(),
             use_legacy_landlock: turn_context.features.use_legacy_landlock(),
-            uses_managed_network_proxy: turn_context.config.permissions.network.is_some(),
         };
         {
             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;

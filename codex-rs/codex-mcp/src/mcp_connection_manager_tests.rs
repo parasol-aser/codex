@@ -80,7 +80,6 @@ async fn notify_sandbox_state_change_updates_latest_state_cache() {
         codex_linux_sandbox_exe: None,
         sandbox_cwd: sandbox_cwd.clone(),
         use_legacy_landlock: false,
-        uses_managed_network_proxy: true,
     };
 
     manager
@@ -91,7 +90,6 @@ async fn notify_sandbox_state_change_updates_latest_state_cache() {
     let cached = current_sandbox_state(&manager.latest_sandbox_state);
     assert_eq!(cached.sandbox_policy, sandbox_state.sandbox_policy);
     assert_eq!(cached.sandbox_cwd, sandbox_state.sandbox_cwd);
-    assert!(cached.uses_managed_network_proxy);
 }
 
 #[tokio::test]
@@ -123,7 +121,6 @@ async fn notify_sandbox_state_change_does_not_wait_for_pending_startup_client() 
         codex_linux_sandbox_exe: None,
         sandbox_cwd: temp_dir.path().join("workspace"),
         use_legacy_landlock: false,
-        uses_managed_network_proxy: false,
     };
 
     tokio::time::timeout(

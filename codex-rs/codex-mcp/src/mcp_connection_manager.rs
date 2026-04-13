@@ -671,8 +671,6 @@ pub struct SandboxState {
     pub sandbox_cwd: PathBuf,
     #[serde(default)]
     pub use_legacy_landlock: bool,
-    #[serde(default)]
-    pub uses_managed_network_proxy: bool,
 }
 
 /// A thin wrapper around a set of running [`RmcpClient`] instances.
@@ -731,7 +729,6 @@ impl McpConnectionManager {
             codex_linux_sandbox_exe: None,
             sandbox_cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             use_legacy_landlock: false,
-            uses_managed_network_proxy: false,
         };
         Self {
             clients: HashMap::new(),
