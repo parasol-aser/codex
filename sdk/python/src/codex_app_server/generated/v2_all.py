@@ -42,52 +42,6 @@ class AccountLoginCompletedNotification(BaseModel):
     success: bool
 
 
-class SentAddCreditsNudgeEmailResult(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    status: Annotated[
-        Literal["sent"], Field(title="SentAddCreditsNudgeEmailResultStatus")
-    ]
-
-
-class CooldownActiveAddCreditsNudgeEmailResult(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    status: Annotated[
-        Literal["cooldownActive"],
-        Field(title="CooldownActiveAddCreditsNudgeEmailResultStatus"),
-    ]
-
-
-class FailedAddCreditsNudgeEmailResult(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    message: str
-    status: Annotated[
-        Literal["failed"], Field(title="FailedAddCreditsNudgeEmailResultStatus")
-    ]
-
-
-class AddCreditsNudgeEmailResult(
-    RootModel[
-        SentAddCreditsNudgeEmailResult
-        | CooldownActiveAddCreditsNudgeEmailResult
-        | FailedAddCreditsNudgeEmailResult
-    ]
-):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    root: (
-        SentAddCreditsNudgeEmailResult
-        | CooldownActiveAddCreditsNudgeEmailResult
-        | FailedAddCreditsNudgeEmailResult
-    )
-
-
 class AgentMessageDeltaNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -255,6 +209,18 @@ class AuthMode(Enum):
     apikey = "apikey"
     chatgpt = "chatgpt"
     chatgpt_auth_tokens = "chatgptAuthTokens"
+
+
+class AutoReviewDecisionSource(RootModel[Literal["agent"]]):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: Annotated[
+        Literal["agent"],
+        Field(
+            description="[UNSTABLE] Source that produced a terminal guardian approval review decision."
+        ),
+    ]
 
 
 class ByteRange(BaseModel):
@@ -878,6 +844,7 @@ class FeedbackUploadParams(BaseModel):
     extra_log_files: Annotated[list[str] | None, Field(alias="extraLogFiles")] = None
     include_logs: Annotated[bool, Field(alias="includeLogs")]
     reason: str | None = None
+    tags: dict[str, Any] | None = None
     thread_id: Annotated[str | None, Field(alias="threadId")] = None
 
 
@@ -1293,6 +1260,7 @@ class GuardianApprovalReviewStatus(Enum):
     in_progress = "inProgress"
     approved = "approved"
     denied = "denied"
+    timed_out = "timedOut"
     aborted = "aborted"
 
 
@@ -1678,6 +1646,27 @@ class McpServerStatusUpdatedNotification(BaseModel):
     status: McpServerStartupState
 
 
+class McpServerToolCallParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    field_meta: Annotated[Any | None, Field(alias="_meta")] = None
+    arguments: Any | None = None
+    server: str
+    thread_id: Annotated[str, Field(alias="threadId")]
+    tool: str
+
+
+class McpServerToolCallResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    field_meta: Annotated[Any | None, Field(alias="_meta")] = None
+    content: list
+    is_error: Annotated[bool | None, Field(alias="isError")] = None
+    structured_content: Annotated[Any | None, Field(alias="structuredContent")] = None
+
+
 class McpToolCallError(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1943,6 +1932,7 @@ class PlanType(Enum):
     go = "go"
     plus = "plus"
     pro = "pro"
+    prolite = "prolite"
     team = "team"
     self_serve_business_usage_based = "self_serve_business_usage_based"
     business = "business"
@@ -3026,13 +3016,6 @@ class SkillsListParams(BaseModel):
     ] = None
 
 
-class SpendControlSnapshot(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    reached: bool
-
-
 class SubAgentSourceValue(Enum):
     review = "review"
     compact = "compact"
@@ -3099,20 +3082,6 @@ class TextRange(BaseModel):
 class ThreadActiveFlag(Enum):
     waiting_on_approval = "waitingOnApproval"
     waiting_on_user_input = "waitingOnUserInput"
-
-
-class ThreadAddCreditsNudgeEmailParams(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    thread_id: Annotated[str, Field(alias="threadId")]
-
-
-class ThreadAddCreditsNudgeEmailResponse(BaseModel):
-    pass
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
 
 
 class ThreadArchiveParams(BaseModel):
@@ -3667,33 +3636,9 @@ class ThreadSourceKind(Enum):
     unknown = "unknown"
 
 
-class ThreadStartParams(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    approval_policy: Annotated[AskForApproval | None, Field(alias="approvalPolicy")] = (
-        None
-    )
-    approvals_reviewer: Annotated[
-        ApprovalsReviewer | None,
-        Field(
-            alias="approvalsReviewer",
-            description="Override where approval requests are routed for review on this thread and subsequent turns.",
-        ),
-    ] = None
-    base_instructions: Annotated[str | None, Field(alias="baseInstructions")] = None
-    config: dict[str, Any] | None = None
-    cwd: str | None = None
-    developer_instructions: Annotated[
-        str | None, Field(alias="developerInstructions")
-    ] = None
-    ephemeral: bool | None = None
-    model: str | None = None
-    model_provider: Annotated[str | None, Field(alias="modelProvider")] = None
-    personality: Personality | None = None
-    sandbox: SandboxMode | None = None
-    service_name: Annotated[str | None, Field(alias="serviceName")] = None
-    service_tier: Annotated[ServiceTier | None, Field(alias="serviceTier")] = None
+class ThreadStartSource(Enum):
+    startup = "startup"
+    clear = "clear"
 
 
 class NotLoadedThreadStatus(BaseModel):
@@ -4037,12 +3982,6 @@ class WindowsWorldWritableWarningNotification(BaseModel):
     sample_paths: Annotated[list[str], Field(alias="samplePaths")]
 
 
-class WorkspaceRole(Enum):
-    account_owner = "account-owner"
-    account_admin = "account-admin"
-    standard_user = "standard-user"
-
-
 class WriteStatus(Enum):
     ok = "ok"
     ok_overridden = "okOverridden"
@@ -4069,17 +4008,7 @@ class AccountUpdatedNotification(BaseModel):
         populate_by_name=True,
     )
     auth_mode: Annotated[AuthMode | None, Field(alias="authMode")] = None
-    is_workspace_owner: Annotated[bool | None, Field(alias="isWorkspaceOwner")] = None
     plan_type: Annotated[PlanType | None, Field(alias="planType")] = None
-    workspace_role: Annotated[WorkspaceRole | None, Field(alias="workspaceRole")] = None
-
-
-class AddCreditsNudgeEmailNotification(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    result: AddCreditsNudgeEmailResult
-    thread_id: Annotated[str, Field(alias="threadId")]
 
 
 class AppConfig(BaseModel):
@@ -4137,15 +4066,6 @@ class InitializeRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["initialize"], Field(title="InitializeRequestMethod")]
     params: InitializeParams
-
-
-class ThreadStartRequest(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    id: RequestId
-    method: Annotated[Literal["thread/start"], Field(title="Thread/startRequestMethod")]
-    params: ThreadStartParams
 
 
 class ThreadResumeRequest(BaseModel):
@@ -4245,18 +4165,6 @@ class ThreadShellCommandRequest(BaseModel):
         Literal["thread/shellCommand"], Field(title="Thread/shellCommandRequestMethod")
     ]
     params: ThreadShellCommandParams
-
-
-class ThreadAddCreditsNudgeEmailRequest(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    id: RequestId
-    method: Annotated[
-        Literal["thread/addCreditsNudgeEmail"],
-        Field(title="Thread/addCreditsNudgeEmailRequestMethod"),
-    ]
-    params: ThreadAddCreditsNudgeEmailParams
 
 
 class ThreadRollbackRequest(BaseModel):
@@ -4524,6 +4432,17 @@ class McpServerResourceReadRequest(BaseModel):
         Field(title="McpServer/resource/readRequestMethod"),
     ]
     params: McpResourceReadParams
+
+
+class McpServerToolCallRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["mcpServer/tool/call"], Field(title="McpServer/tool/callRequestMethod")
+    ]
+    params: McpServerToolCallParams
 
 
 class WindowsSandboxSetupStartRequest(BaseModel):
@@ -5085,9 +5004,7 @@ class GetAccountResponse(BaseModel):
         populate_by_name=True,
     )
     account: Account | None = None
-    is_workspace_owner: Annotated[bool | None, Field(alias="isWorkspaceOwner")] = None
     requires_openai_auth: Annotated[bool, Field(alias="requiresOpenaiAuth")]
-    workspace_role: Annotated[WorkspaceRole | None, Field(alias="workspaceRole")] = None
 
 
 class GuardianApprovalReview(BaseModel):
@@ -5203,8 +5120,18 @@ class ItemGuardianApprovalReviewCompletedNotification(BaseModel):
         populate_by_name=True,
     )
     action: GuardianApprovalReviewAction
+    decision_source: Annotated[AutoReviewDecisionSource, Field(alias="decisionSource")]
     review: GuardianApprovalReview
-    target_item_id: Annotated[str, Field(alias="targetItemId")]
+    review_id: Annotated[
+        str, Field(alias="reviewId", description="Stable identifier for this review.")
+    ]
+    target_item_id: Annotated[
+        str | None,
+        Field(
+            alias="targetItemId",
+            description="Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
+        ),
+    ] = None
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str, Field(alias="turnId")]
 
@@ -5215,7 +5142,16 @@ class ItemGuardianApprovalReviewStartedNotification(BaseModel):
     )
     action: GuardianApprovalReviewAction
     review: GuardianApprovalReview
-    target_item_id: Annotated[str, Field(alias="targetItemId")]
+    review_id: Annotated[
+        str, Field(alias="reviewId", description="Stable identifier for this review.")
+    ]
+    target_item_id: Annotated[
+        str | None,
+        Field(
+            alias="targetItemId",
+            description="Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
+        ),
+    ] = None
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str, Field(alias="turnId")]
 
@@ -5365,9 +5301,6 @@ class RateLimitSnapshot(BaseModel):
     plan_type: Annotated[PlanType | None, Field(alias="planType")] = None
     primary: RateLimitWindow | None = None
     secondary: RateLimitWindow | None = None
-    spend_control: Annotated[
-        SpendControlSnapshot | None, Field(alias="spendControl")
-    ] = None
 
 
 class WebSearchCallResponseItem(BaseModel):
@@ -5541,17 +5474,6 @@ class AccountUpdatedServerNotification(BaseModel):
         Literal["account/updated"], Field(title="Account/updatedNotificationMethod")
     ]
     params: AccountUpdatedNotification
-
-
-class AccountAddCreditsNudgeEmailCompletedServerNotification(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    method: Annotated[
-        Literal["account/addCreditsNudgeEmail/completed"],
-        Field(title="Account/addCreditsNudgeEmail/completedNotificationMethod"),
-    ]
-    params: AddCreditsNudgeEmailNotification
 
 
 class ConfigWarningServerNotification(BaseModel):
@@ -5921,6 +5843,38 @@ class ThreadListParams(BaseModel):
     ] = None
 
 
+class ThreadStartParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    approval_policy: Annotated[AskForApproval | None, Field(alias="approvalPolicy")] = (
+        None
+    )
+    approvals_reviewer: Annotated[
+        ApprovalsReviewer | None,
+        Field(
+            alias="approvalsReviewer",
+            description="Override where approval requests are routed for review on this thread and subsequent turns.",
+        ),
+    ] = None
+    base_instructions: Annotated[str | None, Field(alias="baseInstructions")] = None
+    config: dict[str, Any] | None = None
+    cwd: str | None = None
+    developer_instructions: Annotated[
+        str | None, Field(alias="developerInstructions")
+    ] = None
+    ephemeral: bool | None = None
+    model: str | None = None
+    model_provider: Annotated[str | None, Field(alias="modelProvider")] = None
+    personality: Personality | None = None
+    sandbox: SandboxMode | None = None
+    service_name: Annotated[str | None, Field(alias="serviceName")] = None
+    service_tier: Annotated[ServiceTier | None, Field(alias="serviceTier")] = None
+    session_start_source: Annotated[
+        ThreadStartSource | None, Field(alias="sessionStartSource")
+    ] = None
+
+
 class ThreadTokenUsage(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6135,6 +6089,15 @@ class AppsListResponse(BaseModel):
             description="Opaque cursor to pass to the next call to continue after the last item. If None, there are no more items to return.",
         ),
     ] = None
+
+
+class ThreadStartRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["thread/start"], Field(title="Thread/startRequestMethod")]
+    params: ThreadStartParams
 
 
 class ThreadListRequest(BaseModel):
@@ -6657,7 +6620,6 @@ class ClientRequest(
         | ThreadUnarchiveRequest
         | ThreadCompactStartRequest
         | ThreadShellCommandRequest
-        | ThreadAddCreditsNudgeEmailRequest
         | ThreadRollbackRequest
         | ThreadListRequest
         | ThreadLoadedListRequest
@@ -6689,6 +6651,7 @@ class ClientRequest(
         | ConfigMcpServerReloadRequest
         | McpServerStatusListRequest
         | McpServerResourceReadRequest
+        | McpServerToolCallRequest
         | WindowsSandboxSetupStartRequest
         | AccountLoginStartRequest
         | AccountLoginCancelRequest
@@ -6724,7 +6687,6 @@ class ClientRequest(
         | ThreadUnarchiveRequest
         | ThreadCompactStartRequest
         | ThreadShellCommandRequest
-        | ThreadAddCreditsNudgeEmailRequest
         | ThreadRollbackRequest
         | ThreadListRequest
         | ThreadLoadedListRequest
@@ -6756,6 +6718,7 @@ class ClientRequest(
         | ConfigMcpServerReloadRequest
         | McpServerStatusListRequest
         | McpServerResourceReadRequest
+        | McpServerToolCallRequest
         | WindowsSandboxSetupStartRequest
         | AccountLoginStartRequest
         | AccountLoginCancelRequest
@@ -6977,6 +6940,13 @@ class ThreadForkResponse(BaseModel):
         ),
     ]
     cwd: str
+    instruction_sources: Annotated[
+        list[str] | None,
+        Field(
+            alias="instructionSources",
+            description="Instruction source files currently loaded for this thread.",
+        ),
+    ] = []
     model: str
     model_provider: Annotated[str, Field(alias="modelProvider")]
     reasoning_effort: Annotated[
@@ -7028,6 +6998,13 @@ class ThreadResumeResponse(BaseModel):
         ),
     ]
     cwd: str
+    instruction_sources: Annotated[
+        list[str] | None,
+        Field(
+            alias="instructionSources",
+            description="Instruction source files currently loaded for this thread.",
+        ),
+    ] = []
     model: str
     model_provider: Annotated[str, Field(alias="modelProvider")]
     reasoning_effort: Annotated[
@@ -7063,6 +7040,13 @@ class ThreadStartResponse(BaseModel):
         ),
     ]
     cwd: str
+    instruction_sources: Annotated[
+        list[str] | None,
+        Field(
+            alias="instructionSources",
+            description="Instruction source files currently loaded for this thread.",
+        ),
+    ] = []
     model: str
     model_provider: Annotated[str, Field(alias="modelProvider")]
     reasoning_effort: Annotated[
@@ -7130,7 +7114,6 @@ class ServerNotification(
         | McpServerStartupStatusUpdatedServerNotification
         | AccountUpdatedServerNotification
         | AccountRateLimitsUpdatedServerNotification
-        | AccountAddCreditsNudgeEmailCompletedServerNotification
         | AppListUpdatedServerNotification
         | FsChangedServerNotification
         | ItemReasoningSummaryTextDeltaServerNotification
@@ -7189,7 +7172,6 @@ class ServerNotification(
         | McpServerStartupStatusUpdatedServerNotification
         | AccountUpdatedServerNotification
         | AccountRateLimitsUpdatedServerNotification
-        | AccountAddCreditsNudgeEmailCompletedServerNotification
         | AppListUpdatedServerNotification
         | FsChangedServerNotification
         | ItemReasoningSummaryTextDeltaServerNotification

@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from .v2_all import AccountLoginCompletedNotification
 from .v2_all import AccountRateLimitsUpdatedNotification
 from .v2_all import AccountUpdatedNotification
-from .v2_all import AddCreditsNudgeEmailNotification
 from .v2_all import AgentMessageDeltaNotification
 from .v2_all import AppListUpdatedNotification
 from .v2_all import CommandExecOutputDeltaNotification
@@ -60,7 +59,6 @@ from .v2_all import WindowsSandboxSetupCompletedNotification
 from .v2_all import WindowsWorldWritableWarningNotification
 
 NOTIFICATION_MODELS: dict[str, type[BaseModel]] = {
-    "account/addCreditsNudgeEmail/completed": AddCreditsNudgeEmailNotification,
     "account/login/completed": AccountLoginCompletedNotification,
     "account/rateLimits/updated": AccountRateLimitsUpdatedNotification,
     "account/updated": AccountUpdatedNotification,
